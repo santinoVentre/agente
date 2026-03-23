@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from config import config
-from telegram.notifications import notify_approval_needed
-from telegram.handlers import request_approval
+from tg.notifications import notify_approval_needed
+from tg.handlers import request_approval
 from utils.logging import setup_logging
 
 log = setup_logging("dependency_manager")

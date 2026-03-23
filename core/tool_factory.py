@@ -14,7 +14,7 @@ from core.openrouter_client import openrouter
 from core.tool_registry import tool_registry
 from core.tool_validator import tool_validator
 from db.models import RiskLevel
-from telegram.notifications import notify, notify_done, notify_error
+from tg.notifications import notify, notify_done, notify_error
 from utils.logging import setup_logging
 
 log = setup_logging("tool_factory")

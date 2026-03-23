@@ -10,8 +10,8 @@ from core.model_router import TaskType, get_model_for_task
 from core.task_manager import task_manager
 from db.models import ActionVerdict, RiskLevel, TaskStatus
 from agents.security_agent import security_agent
-from telegram.notifications import notify, notify_approval_needed, notify_progress
-from telegram.handlers import request_approval
+from tg.notifications import notify, notify_approval_needed, notify_progress
+from tg.handlers import request_approval
 from utils.logging import setup_logging
 
 log = setup_logging("base_agent")

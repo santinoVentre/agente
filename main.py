@@ -12,9 +12,9 @@ from core.orchestrator import Orchestrator
 from core.openrouter_client import openrouter
 from core.task_manager import task_manager
 from core.tool_registry import tool_registry
-from telegram.bot import build_app
-from telegram.handlers import set_orchestrator
-from telegram.notifications import set_app
+from tg.bot import build_app
+from tg.handlers import set_orchestrator
+from tg.notifications import set_app
 from utils.logging import setup_logging
 
 # Tools

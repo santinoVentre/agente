@@ -12,7 +12,7 @@ from core.model_router import CLASSIFICATION_PROMPT, TaskType, get_model_for_tas
 from core.openrouter_client import openrouter
 from core.task_manager import task_manager
 from db.models import TaskStatus
-from telegram.notifications import notify, notify_done, notify_error
+from tg.notifications import notify, notify_done, notify_error
 from utils.cost_tracker import cost_tracker
 from utils.logging import setup_logging
 

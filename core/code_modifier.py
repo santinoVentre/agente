@@ -11,8 +11,8 @@ from config import config
 from core.model_router import TaskType, get_model_for_task
 from core.openrouter_client import openrouter
 from agents.security_agent import security_agent
-from telegram.notifications import notify, notify_approval_needed
-from telegram.handlers import request_approval
+from tg.notifications import notify, notify_approval_needed
+from tg.handlers import request_approval
 from utils.logging import setup_logging
 
 log = setup_logging("code_modifier")

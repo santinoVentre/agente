@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 from config import config
-from telegram.handlers import (
+from tg.handlers import (
     cmd_cancel,
     cmd_costs,
     cmd_start,
@@ -23,7 +23,7 @@ from telegram.handlers import (
     handle_message,
     handle_photo,
 )
-from telegram.notifications import set_app
+from tg.notifications import set_app
 from utils.logging import setup_logging
 
 log = setup_logging("tg_bot")
