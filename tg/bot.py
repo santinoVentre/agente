@@ -41,6 +41,8 @@ def build_app() -> Application:
     # Commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("logs", cmd_logs))
+    app.add_handler(CommandHandler("log", cmd_log))
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("costs", cmd_costs))
     app.add_handler(CommandHandler("tools", cmd_tools))

@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING
 from telegram import Update
 from telegram.ext import ContextTypes
 
+import re
 from config import config
 from utils.logging import setup_logging
 from utils.cost_tracker import cost_tracker
+from pathlib import Path
 
 if TYPE_CHECKING:
     from core.orchestrator import Orchestrator
@@ -27,6 +29,12 @@ _pending_approvals: dict[int, asyncio.Future[bool]] = {}
 def set_orchestrator(orch: "Orchestrator"):
     global _orchestrator
     _orchestrator = orch
+
+def md_bold_to_html(text: str) -> str:
+    # Replace **text** or *text* with <b>text</b>
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.+?)\*", r"<b>\1</b>", text)
+    return text
 
 
 def _is_authorized(update: Update) -> bool:
@@ -130,10 +138,41 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id=update.effective_chat.id,
     )
     if response:
+        # Convert markdown bold to HTML bold
+        response = md_bold_to_html(response)
         # Split long messages (Telegram limit: 4096 chars)
         for i in range(0, len(response), 4000):
             chunk = response[i : i + 4000]
             await update.message.reply_text(chunk, parse_mode="HTML")
+
+# ── Logs command ─────────────────────────────────────────────────
+async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    logs_dir = config.logs_dir
+    log_files = sorted(Path(logs_dir).glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not log_files:
+        await update.message.reply_text("Nessun file di log trovato.")
+        return
+    msg = "<b>Log files disponibili:</b>\n"
+    for i, f in enumerate(log_files[:10], 1):
+        msg += f"{i}. <code>{f.name}</code> ({f.stat().st_size//1024} KB)\n"
+    msg += "\nRispondi con /log <nomefile> per riceverlo."
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+async def cmd_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Uso: /log <nomefile.log>")
+        return
+    logs_dir = config.logs_dir
+    fname = ctx.args[0]
+    fpath = Path(logs_dir) / fname
+    if not fpath.exists() or not fpath.is_file():
+        await update.message.reply_text("File di log non trovato.")
+        return
+    await update.message.reply_document(document=str(fpath), filename=fpath.name)
 
 
 # ── Callback queries (approve/reject) ───────────────────────────────────
