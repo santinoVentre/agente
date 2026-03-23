@@ -19,6 +19,8 @@ class TaskType(str, Enum):
     COMPLEX_REASONING = "complex"  # Multi-step planning, architecture
     SUMMARIZATION = "summary"      # Summarizing conversations / docs
     WEB_DEV = "web_dev"            # Creating websites
+    WEB_BROWSING = "web_browsing"  # Browsing, scraping, searching the web
+    SYSTEM = "system"              # System administration, VPS management
     MEDIA = "media"                # Media processing instructions
 
 
@@ -32,6 +34,8 @@ _TASK_MODEL_MAP: dict[TaskType, str] = {
     TaskType.CODE_REVIEW: "model_mid",
     TaskType.COMPLEX_REASONING: "model_expensive",
     TaskType.WEB_DEV: "model_mid",
+    TaskType.WEB_BROWSING: "model_cheap",
+    TaskType.SYSTEM: "model_mid",
     TaskType.MEDIA: "model_cheap",
 }
 
@@ -53,6 +57,8 @@ CLASSIFICATION_PROMPT = """You are a request classifier. Given the user's messag
 - complex: multi-step planning, architecture, detailed analysis
 - summary: summarizing conversations, documents, or data
 - web_dev: creating or modifying websites
+- web_browsing: browsing websites, scraping content, searching online
+- system: system administration, server management, VPS ops
 - media: image/video processing, download, conversion
 
 Respond with ONLY the task type string, nothing else."""
