@@ -1,0 +1,22 @@
+# Core
+python-telegram-bot[ext]==20.*
+httpx[http2]>=0.27,<1
+sqlalchemy[asyncio]>=2.0,<3
+asyncpg>=0.29,<1
+redis[hiredis]>=5.0,<6
+pydantic>=2.0,<3
+python-dotenv>=1.0,<2
+alembic>=1.13,<2
+
+# Browser
+playwright>=1.44,<2
+
+# Media — images
+Pillow>=10.0,<11
+rembg>=2.0,<3
+
+# Media — video
+ffmpeg-python>=0.2,<1
+
+# Misc
+aiofiles>=23.0,<25

@@ -1,0 +1,29 @@
+[Unit]
+Description=Personal Agent Multi-LLM System
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/srv/agent/app
+Environment=PATH=/srv/agent/app/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/srv/agent/app/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=200%
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=false
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
