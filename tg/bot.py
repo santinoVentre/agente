@@ -18,6 +18,8 @@ from tg.handlers import (
     cmd_status,
     cmd_tasks,
     cmd_tools,
+    cmd_logs,
+    cmd_log,
     handle_callback,
     handle_document,
     handle_message,
