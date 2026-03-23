@@ -181,6 +181,24 @@ class ToolRegistryManager:
             )
             await session.commit()
 
+    async def load_all(self):
+        """Load all active custom (generated) tools from DB on startup."""
+        async with async_session() as session:
+            result = await session.execute(
+                select(ToolRegistryModel).where(
+                    ToolRegistryModel.status == ToolStatus.ACTIVE,
+                    ToolRegistryModel.source == ToolSource.GENERATED,
+                )
+            )
+            entries = result.scalars().all()
+            for entry in entries:
+                if entry.source_path:
+                    await self.load_custom_tool(entry.name)
+
+    def count(self) -> int:
+        """Return number of currently loaded tools."""
+        return len(self._loaded_tools)
+
     async def list_tools_summary(self) -> list[dict]:
         async with async_session() as session:
             result = await session.execute(
