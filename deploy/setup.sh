@@ -76,6 +76,10 @@ else
     git clone "$REPO_URL" "$APP_DIR"
 fi
 
+# ── 5b. Fix permissions BEFORE venv creation ─────────────────────
+echo "[5b] Setting permissions on $BASE_DIR..."
+chown -R "$AGENT_USER:$AGENT_USER" "$BASE_DIR"
+
 # ── 6. Python venv + dependencies (as agent) ────────────────────
 echo "[6/9] Setting up Python venv and dependencies..."
 cd "$APP_DIR"
@@ -86,8 +90,8 @@ sudo -u "$AGENT_USER" bash -c "source $APP_DIR/.venv/bin/activate && pip install
 echo "[7/9] Installing Playwright Chromium..."
 sudo -u "$AGENT_USER" "$APP_DIR/.venv/bin/playwright" install chromium
 
-# ── 8. Fix all permissions ───────────────────────────────────────
-echo "[8/9] Setting permissions..."
+# ── 8. Fix all permissions (again, after venv creation) ──────────
+echo "[8/9] Final permission fix..."
 chown -R "$AGENT_USER:$AGENT_USER" "$BASE_DIR"
 
 # ── 9. Docker containers + Systemd ──────────────────────────────
