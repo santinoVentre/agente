@@ -34,6 +34,7 @@ def build_app() -> Application:
     app = (
         Application.builder()
         .token(config.telegram_bot_token)
+        .concurrent_updates(True)
         .build()
     )
 
