@@ -119,47 +119,58 @@ class BaseAgent:
         tool_schemas = self.get_tool_schemas()
         max_iterations = 15
 
-        for iteration in range(max_iterations):
-            response = await openrouter.chat(
-                model=model,
-                messages=messages,
-                tools=tool_schemas if tool_schemas else None,
-                temperature=0.3,
-                max_tokens=4096,
+        while True:
+            for iteration in range(max_iterations):
+                response = await openrouter.chat(
+                    model=model,
+                    messages=messages,
+                    tools=tool_schemas if tool_schemas else None,
+                    temperature=0.3,
+                    max_tokens=4096,
+                )
+
+                choice = response.get("choices", [{}])[0]
+                message = choice.get("message", {})
+                finish_reason = choice.get("finish_reason", "stop")
+
+                # If the model wants to call tools
+                tool_calls = message.get("tool_calls", [])
+                if tool_calls:
+                    messages.append(message)  # assistant message with tool_calls
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        tool_name = fn.get("name", "")
+                        try:
+                            args = json.loads(fn.get("arguments", "{}"))
+                        except json.JSONDecodeError:
+                            args = {}
+
+                        log.info(f"[{self.name}] Tool call: {tool_name}({args})")
+                        result = await self.execute_tool(tool_name, args, task_id)
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": json.dumps(result, default=str)[:8000],
+                        })
+
+                        # Update progress
+                        progress = min(90, 10 + iteration * 10)
+                        await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=progress)
+                    continue
+
+                # Final text response
+                content = message.get("content", "")
+                return content
+
+            # Reached iteration limit — ask user if we should continue
+            await notify_approval_needed(
+                f"Limite iterazioni raggiunto ({max_iterations})\n"
+                f"Agente: <b>{self.name}</b> — Task #{task_id}\n"
+                f"Posso continuare?",
+                task_id=task_id,
             )
-
-            choice = response.get("choices", [{}])[0]
-            message = choice.get("message", {})
-            finish_reason = choice.get("finish_reason", "stop")
-
-            # If the model wants to call tools
-            tool_calls = message.get("tool_calls", [])
-            if tool_calls:
-                messages.append(message)  # assistant message with tool_calls
-                for tc in tool_calls:
-                    fn = tc.get("function", {})
-                    tool_name = fn.get("name", "")
-                    try:
-                        args = json.loads(fn.get("arguments", "{}"))
-                    except json.JSONDecodeError:
-                        args = {}
-
-                    log.info(f"[{self.name}] Tool call: {tool_name}({args})")
-                    result = await self.execute_tool(tool_name, args, task_id)
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", ""),
-                        "content": json.dumps(result, default=str)[:8000],
-                    })
-
-                    # Update progress
-                    progress = min(90, 10 + iteration * 10)
-                    await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=progress)
-                continue
-
-            # Final text response
-            content = message.get("content", "")
-            return content
-
-        return "Ho raggiunto il limite massimo di iterazioni. Ecco quello che ho fatto finora."
+            approved = await request_approval(task_id, timeout=600.0)
+            if not approved:
+                return "Ho raggiunto il limite massimo di iterazioni. Ecco quello che ho fatto finora."
+            log.info(f"[{self.name}] User approved continuation for task #{task_id}")
