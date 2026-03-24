@@ -66,8 +66,17 @@ class SecurityAgent:
         # Destructive commands
         if any(kw in cmd_lower for kw in ["rm ", "kill -9", "pkill", "systemctl stop"]):
             return RiskLevel.HIGH, None
+
+        # Self-management (agent restarting itself, installing in its own venv)
+        if "systemctl restart agent" in cmd_lower:
+            return RiskLevel.LOW, None
+        if ".venv/bin/pip install" in cmd_lower:
+            return RiskLevel.LOW, None
+        if "git pull" in cmd_lower and "/srv/agent" in cmd_lower:
+            return RiskLevel.LOW, None
+
         if any(kw in cmd_lower for kw in [
-            "apt install", "apt remove", "pip install", "npm install",
+            "apt install", "apt-get install", "apt remove", "pip install", "npm install",
             "systemctl restart", "docker rm", "docker stop",
         ]):
             return RiskLevel.MEDIUM, None

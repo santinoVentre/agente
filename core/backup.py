@@ -59,12 +59,26 @@ async def backup_job() -> str:
 
     # 4. Push to GitHub
     token = config.github_token
-    owner = config.github_owner
-    if not token or not owner:
-        results.append("⚠️ GitHub token/owner non configurato, skip push")
+    if not token:
+        results.append("⚠️ GitHub token non configurato, skip push")
         summary = " | ".join(results)
         await notify(f"📦 <b>Backup locale completato</b>\n{summary}\nPath: {backup_dir}")
         return summary
+
+    # Determine the authenticated user (token owner)
+    import httpx
+    async with httpx.AsyncClient() as client:
+        user_resp = await client.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if user_resp.status_code != 200:
+            results.append(f"❌ GitHub auth failed: {user_resp.status_code}")
+            summary = " | ".join(results)
+            await notify(f"📦 <b>Backup completato</b>\n{summary}")
+            await _run_cmd(f"rm -rf {backup_dir}")
+            return summary
+        owner = user_resp.json().get("login", "")
 
     repo_url = f"https://{token}@github.com/{owner}/{BACKUP_REPO}.git"
     git_dir = backup_dir / "repo"

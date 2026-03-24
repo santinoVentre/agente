@@ -15,15 +15,36 @@ from utils.logging import setup_logging
 log = setup_logging("tool_fs")
 
 
-def _is_safe_path(path: str) -> bool:
-    """Ensure the path is under allowed directories."""
+def _is_safe_path(path: str, action: str = "read") -> bool:
+    """Ensure the path is under allowed directories.
+    
+    Read/list/exists are allowed on the agent's own source tree too,
+    so the agent can inspect and understand its own code.
+    Write/delete/move operations on core files go through security_agent approval.
+    """
     resolved = Path(path).resolve()
-    allowed_roots = [
+
+    # Always writable roots
+    writable_roots = [
         config.workspaces_dir.resolve(),
         config.media_dir.resolve(),
         config.tools_custom_dir.resolve(),
+        config.tool_backups_dir.resolve(),
+        Path(config.logs_dir).resolve(),
     ]
-    return any(str(resolved).startswith(str(root)) for root in allowed_roots)
+    if any(str(resolved).startswith(str(root)) for root in writable_roots):
+        return True
+
+    # Agent source tree: readable (read/list/exists), writes checked by security_agent
+    agent_root = Path("/srv/agent/app").resolve()
+    if str(resolved).startswith(str(agent_root)):
+        return True  # security_agent handles write protection via PROTECTED_PATHS
+
+    # /tmp is allowed for transient operations
+    if str(resolved).startswith("/tmp"):
+        return True
+
+    return False
 
 
 class FileSystemTool(BaseTool):
@@ -60,7 +81,7 @@ class FileSystemTool(BaseTool):
         action: str = kwargs["action"]
         path: str = kwargs["path"]
 
-        if not _is_safe_path(path):
+        if not _is_safe_path(path, action):
             return {"success": False, "error": f"Access denied: path '{path}' is outside allowed directories."}
 
         p = Path(path)

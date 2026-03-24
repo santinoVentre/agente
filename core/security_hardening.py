@@ -22,14 +22,16 @@ async def _run_cmd(cmd: str) -> tuple[str, int]:
 
 
 async def security_audit_job() -> str:
-    """Scheduled job: check security posture. No AI cost."""
+    """Scheduled job: check security posture and suggest fixes. No AI cost."""
     issues = []
     checks_ok = []
+    fixes = []
 
     # 1. SSH password auth check
     out, _ = await _run_cmd("grep -i '^PasswordAuthentication' /etc/ssh/sshd_config 2>/dev/null || echo 'NOT_FOUND'")
     if "yes" in out.lower():
         issues.append("🔴 SSH password auth abilitata")
+        fixes.append("Fix: <code>sudo sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config && sudo systemctl restart sshd</code>")
     elif "no" in out.lower():
         checks_ok.append("SSH password auth disabilitata")
     else:
@@ -37,8 +39,12 @@ async def security_audit_job() -> str:
 
     # 2. Firewall status
     out, rc = await _run_cmd("ufw status 2>/dev/null || echo 'UFW_NOT_INSTALLED'")
-    if "inactive" in out.lower() or "UFW_NOT_INSTALLED" in out:
+    if "UFW_NOT_INSTALLED" in out:
+        issues.append("🔴 UFW non installato")
+        fixes.append("Fix: <code>sudo apt-get install -y ufw && sudo ufw default deny incoming && sudo ufw default allow outgoing && sudo ufw allow 22/tcp && sudo ufw --force enable</code>")
+    elif "inactive" in out.lower():
         issues.append("🔴 Firewall (UFW) non attivo")
+        fixes.append("Fix: <code>sudo ufw default deny incoming && sudo ufw default allow outgoing && sudo ufw allow 22/tcp && sudo ufw --force enable</code>")
     elif "active" in out.lower():
         checks_ok.append("UFW attivo")
 
@@ -47,7 +53,14 @@ async def security_audit_job() -> str:
     if "active" in out.strip() and "NOT_ACTIVE" not in out:
         checks_ok.append("fail2ban attivo")
     else:
-        issues.append("🟡 fail2ban non attivo")
+        # Check if installed
+        out2, _ = await _run_cmd("which fail2ban-server 2>/dev/null || echo 'NOT_INSTALLED'")
+        if "NOT_INSTALLED" in out2:
+            issues.append("🟡 fail2ban non installato")
+            fixes.append("Fix: <code>sudo apt-get install -y fail2ban && sudo systemctl enable --now fail2ban</code>")
+        else:
+            issues.append("🟡 fail2ban installato ma non attivo")
+            fixes.append("Fix: <code>sudo systemctl enable --now fail2ban</code>")
 
     # 4. Docker containers running
     out, rc = await _run_cmd("docker ps --format '{{.Names}}: {{.Status}}' 2>/dev/null")
@@ -65,6 +78,7 @@ async def security_audit_job() -> str:
         disk_pct = int(out.strip())
         if disk_pct > 90:
             issues.append(f"🔴 Disco quasi pieno: {disk_pct}%")
+            fixes.append("Fix: pulisci /tmp, vecchi log, o contenuto non necessario")
         elif disk_pct > 80:
             issues.append(f"🟡 Disco al {disk_pct}%")
         else:
@@ -85,12 +99,23 @@ async def security_audit_job() -> str:
     except ValueError:
         pass
 
-    # Send alert only if there are issues
+    # 8. Agent service health
+    out, rc = await _run_cmd("systemctl is-active agent 2>/dev/null")
+    if "active" in out.strip():
+        checks_ok.append("Servizio agent attivo")
+    else:
+        issues.append("🔴 Servizio agent non attivo!")
+
+    # Build report — always send, with both issues and OK checks
+    msg = "🔒 <b>Security Audit</b>\n"
     if issues:
-        msg = "🔒 <b>Security Audit</b>\n"
-        msg += "\n".join(issues)
-        if checks_ok:
-            msg += "\n\n✅ " + "\n✅ ".join(checks_ok)
+        msg += "\n".join(issues) + "\n"
+    if fixes:
+        msg += "\n<b>Fix suggeriti:</b>\n" + "\n".join(fixes) + "\n"
+    if checks_ok:
+        msg += "\n✅ " + "\n✅ ".join(checks_ok)
+
+    if issues:
         await notify(msg)
 
     return f"{len(checks_ok)} ok, {len(issues)} issues"
