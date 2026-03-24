@@ -108,6 +108,16 @@ class Orchestrator:
         if not agent:
             return "⚠️ Nessun agente disponibile per gestire questa richiesta."
 
+        # Check daily budget before creating task
+        if not cost_tracker.check_daily_budget() and task_type not in (
+            TaskType.SIMPLE_CHAT, TaskType.ROUTING,
+        ):
+            daily = cost_tracker.get_daily_cost()
+            return (
+                f"⚠️ Budget giornaliero raggiunto (${daily:.2f} / ${cost_tracker.daily_budget:.2f}).\n"
+                f"Le richieste costose sono bloccate. Usa /budget daily <valore> per modificare il limite."
+            )
+
         # Create task
         task = await task_manager.create_task(
             user_id=user_id,
@@ -302,9 +312,12 @@ class Orchestrator:
             "- Per azioni DISTRUTTIVE (rm -rf, drop database, modifica firewall/SSH, modifica file core), chiedi conferma.",
             "- Per azioni COSTRUTTIVE (installare pacchetti, creare file, scrivere in workspaces), agisci autonomamente.",
             "- Quando qualcosa fallisce, NON ARRENDERTI. Leggi l'errore, cerca la soluzione, itera.",
+            "- ATTENZIONE AI COSTI: hai un budget per task e un budget giornaliero. "
+            "  Sii efficiente: non fare iterazioni inutili, non generare output enorme senza motivo. "
+            "  Se un approccio non funziona dopo 2-3 tentativi, cambia strategia invece di riprovare.",
             "- Se devi installare pacchetti Python, usa SEMPRE /srv/agent/app/.venv/bin/pip, non pip globale.",
             "- Job schedulati attivi: monitoring (5min), backup (24h), security_audit (6h).",
-            "- Comandi Telegram: /start, /status, /tasks, /costs, /tools, /cancel, /logs, /log, /jobs, /job_enable, /job_disable, /help",
+            "- Comandi Telegram: /start, /status, /tasks, /costs, /budget, /tools, /cancel, /force_cancel, /logs, /log, /jobs, /job_enable, /job_disable, /help",
 
             f"\nStai operando come agente: {agent_name}",
         ]

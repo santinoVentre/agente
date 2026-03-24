@@ -46,6 +46,7 @@ class OpenRouterClient:
         temperature: float = 0.3,
         max_tokens: int = 4096,
         stream: bool = False,
+        task_id: int | None = None,
     ) -> dict[str, Any]:
         """Non-streaming chat completion. Returns the full response dict."""
         client = await self._get_client()
@@ -61,7 +62,7 @@ class OpenRouterClient:
             payload["tool_choice"] = tool_choice
 
         resp = await self._request_with_retry(client, payload)
-        await self._track_cost(model, resp)
+        await self._track_cost(model, resp, task_id)
         return resp
 
     async def chat_stream(
@@ -115,13 +116,13 @@ class OpenRouterClient:
                     await asyncio.sleep(2 ** attempt)
         raise RuntimeError(f"OpenRouter request failed after {max_retries} retries: {last_err}")
 
-    async def _track_cost(self, model: str, response: dict):
+    async def _track_cost(self, model: str, response: dict, task_id: int | None = None):
         usage = response.get("usage", {})
         tokens_in = usage.get("prompt_tokens", 0)
         tokens_out = usage.get("completion_tokens", 0)
         # OpenRouter returns cost in the response header or we estimate
         cost = float(response.get("usage", {}).get("total_cost", 0) or 0)
-        await cost_tracker.record(model, tokens_in, tokens_out, cost)
+        await cost_tracker.record(model, tokens_in, tokens_out, cost, task_id=task_id)
 
     async def close(self):
         if self._client and not self._client.is_closed:

@@ -118,6 +118,76 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result)
 
 
+async def cmd_force_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Force-cancel a stuck task by directly updating DB status."""
+    if not _is_authorized(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Uso: /force_cancel <task_id>")
+        return
+    try:
+        task_id = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("ID task non valido.")
+        return
+
+    from core.task_manager import task_manager
+    from db.models import TaskStatus
+
+    # Cancel asyncio task if exists
+    atask = task_manager._running_tasks.pop(task_id, None)
+    if atask and not atask.done():
+        atask.cancel()
+
+    # Clear any pending approval
+    future = _pending_approvals.pop(task_id, None)
+    if future and not future.done():
+        future.set_result(False)
+
+    # Force DB status update
+    await task_manager.update_task_status(task_id, TaskStatus.CANCELLED)
+    await update.message.reply_text(
+        f"🔧 Task #{task_id} forzatamente cancellato.\n"
+        f"Asyncio task: {'annullato' if atask else 'non trovato'}\n"
+        f"Status DB: CANCELLED"
+    )
+
+
+async def cmd_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show/set cost budgets."""
+    if not _is_authorized(update):
+        return
+
+    if ctx.args and len(ctx.args) >= 2:
+        budget_type = ctx.args[0].lower()
+        try:
+            value = float(ctx.args[1])
+        except ValueError:
+            await update.message.reply_text("Valore non valido. Uso: /budget [task|daily] <valore>")
+            return
+
+        if budget_type == "task":
+            cost_tracker.task_budget = value
+            await update.message.reply_text(f"✅ Budget per task: ${value:.2f}")
+        elif budget_type == "daily":
+            cost_tracker.daily_budget = value
+            await update.message.reply_text(f"✅ Budget giornaliero: ${value:.2f}")
+        else:
+            await update.message.reply_text("Tipo non valido. Uso: /budget [task|daily] <valore>")
+        return
+
+    # Show current budgets
+    daily_cost = cost_tracker.get_daily_cost()
+    await update.message.reply_text(
+        f"💰 <b>Budget attuale:</b>\n"
+        f"Per task: <b>${cost_tracker.task_budget:.2f}</b>\n"
+        f"Giornaliero: <b>${cost_tracker.daily_budget:.2f}</b>\n\n"
+        f"📊 <b>Spesa di oggi:</b> ${daily_cost:.2f} / ${cost_tracker.daily_budget:.2f}\n"
+        f"Totale sessione: ${cost_tracker.total_cost:.2f}",
+        parse_mode="HTML",
+    )
+
+
 # ── Messages ─────────────────────────────────────────────────────────────
 
 
@@ -242,8 +312,10 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/status — stato agenti e task\n"
         "/tasks — lista task attivi\n"
         "/costs — riepilogo costi API\n"
+        "/budget — mostra budget (o /budget task|daily X)\n"
         "/tools — lista tool disponibili\n"
         "/cancel &lt;id&gt; — annulla un task\n"
+        "/force_cancel &lt;id&gt; — forza cancellazione task bloccato\n"
         "/logs — lista file di log\n"
         "/log &lt;file&gt; — scarica un log\n"
         "/jobs — lista job schedulati\n"

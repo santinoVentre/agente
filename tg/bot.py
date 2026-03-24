@@ -13,7 +13,9 @@ from telegram.ext import (
 from config import config
 from tg.handlers import (
     cmd_cancel,
+    cmd_force_cancel,
     cmd_costs,
+    cmd_budget,
     cmd_start,
     cmd_status,
     cmd_tasks,
@@ -53,6 +55,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("costs", cmd_costs))
     app.add_handler(CommandHandler("tools", cmd_tools))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("force_cancel", cmd_force_cancel))
+    app.add_handler(CommandHandler("budget", cmd_budget))
     app.add_handler(CommandHandler("jobs", cmd_jobs))
     app.add_handler(CommandHandler("job_enable", cmd_job_enable))
     app.add_handler(CommandHandler("job_disable", cmd_job_disable))

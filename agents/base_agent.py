@@ -12,9 +12,12 @@ from db.models import ActionVerdict, RiskLevel, TaskStatus
 from agents.security_agent import security_agent
 from tg.notifications import notify, notify_approval_needed, notify_progress
 from tg.handlers import request_approval
+from utils.cost_tracker import cost_tracker
 from utils.logging import setup_logging
 
 log = setup_logging("base_agent")
+
+MAX_CONTINUATIONS = 2  # Max times user can approve continuing past iteration limit
 
 
 class BaseAgent:
@@ -106,6 +109,7 @@ class BaseAgent:
         """
         Main agent loop: send prompt to LLM with tool schemas,
         handle tool calls iteratively until the LLM returns a final text response.
+        Enforces per-task and daily cost budgets.
         """
         model = model_override or get_model_for_task(self.default_task_type)
         messages = []
@@ -118,15 +122,49 @@ class BaseAgent:
 
         tool_schemas = self.get_tool_schemas()
         max_iterations = 15
+        continuations = 0
+
+        # Check daily budget before starting
+        if not cost_tracker.check_daily_budget():
+            daily = cost_tracker.get_daily_cost()
+            return (
+                f"⚠️ Budget giornaliero raggiunto (${daily:.2f} / ${cost_tracker.daily_budget:.2f}). "
+                f"Le richieste costose sono bloccate fino a domani."
+            )
 
         while True:
             for iteration in range(max_iterations):
+                # Check per-task cost limit
+                task_cost = cost_tracker.get_task_cost(task_id)
+                if task_cost >= cost_tracker.task_budget:
+                    log.warning(f"[{self.name}] Task #{task_id} exceeded budget: ${task_cost:.4f}")
+                    await notify(
+                        f"⚠️ <b>Task #{task_id} fermato</b>: budget superato "
+                        f"(${task_cost:.2f} / ${cost_tracker.task_budget:.2f})\n"
+                        f"Iterazioni completate: {iteration}"
+                    )
+                    return (
+                        f"Ho raggiunto il limite di costo per questo task "
+                        f"(${task_cost:.2f} / ${cost_tracker.task_budget:.2f}). "
+                        f"Ecco quello che ho fatto finora."
+                    )
+
+                # Check daily budget
+                if not cost_tracker.check_daily_budget():
+                    daily = cost_tracker.get_daily_cost()
+                    log.warning(f"[{self.name}] Daily budget exceeded: ${daily:.4f}")
+                    await notify(
+                        f"⚠️ <b>Budget giornaliero esaurito</b>: ${daily:.2f} / ${cost_tracker.daily_budget:.2f}"
+                    )
+                    return "Budget giornaliero esaurito. Richieste costose bloccate fino a domani."
+
                 response = await openrouter.chat(
                     model=model,
                     messages=messages,
                     tools=tool_schemas if tool_schemas else None,
                     temperature=0.3,
                     max_tokens=4096,
+                    task_id=task_id,
                 )
 
                 choice = response.get("choices", [{}])[0]
@@ -163,14 +201,30 @@ class BaseAgent:
                 content = message.get("content", "")
                 return content
 
-            # Reached iteration limit — ask user if we should continue
+            # Reached iteration limit — check if we can ask for continuation
+            continuations += 1
+            if continuations > MAX_CONTINUATIONS:
+                task_cost = cost_tracker.get_task_cost(task_id)
+                await notify(
+                    f"🛑 <b>Task #{task_id} fermato definitivamente</b>\n"
+                    f"Raggiunte {max_iterations * (continuations)} iterazioni totali.\n"
+                    f"Costo task: ${task_cost:.2f}"
+                )
+                return (
+                    "Ho raggiunto il limite massimo di continuazioni. "
+                    "Non posso proseguire oltre per evitare costi eccessivi."
+                )
+
+            task_cost = cost_tracker.get_task_cost(task_id)
             await notify_approval_needed(
-                f"Limite iterazioni raggiunto ({max_iterations})\n"
+                f"⏸️ Limite iterazioni raggiunto ({max_iterations})\n"
                 f"Agente: <b>{self.name}</b> — Task #{task_id}\n"
+                f"💰 Costo finora: <b>${task_cost:.2f}</b> / ${cost_tracker.task_budget:.2f}\n"
+                f"Continuazione {continuations}/{MAX_CONTINUATIONS}\n"
                 f"Posso continuare?",
                 task_id=task_id,
             )
             approved = await request_approval(task_id, timeout=600.0)
             if not approved:
                 return "Ho raggiunto il limite massimo di iterazioni. Ecco quello che ho fatto finora."
-            log.info(f"[{self.name}] User approved continuation for task #{task_id}")
+            log.info(f"[{self.name}] User approved continuation {continuations}/{MAX_CONTINUATIONS} for task #{task_id}")

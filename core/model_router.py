@@ -28,14 +28,14 @@ class TaskType(str, Enum):
 _TASK_MODEL_MAP: dict[TaskType, str] = {
     TaskType.ROUTING: "model_cheap",
     TaskType.SIMPLE_CHAT: "model_cheap",
-    TaskType.TOOL_EXECUTION: "model_tool_execution",
+    TaskType.TOOL_EXECUTION: "model_cheap",
     TaskType.SUMMARIZATION: "model_cheap",
-    TaskType.CODE_GENERATION: "model_code_generation",
-    TaskType.CODE_REVIEW: "model_mid",
-    TaskType.COMPLEX_REASONING: "model_expensive",
-    TaskType.WEB_DEV: "model_mid",
+    TaskType.CODE_GENERATION: "model_mid",
+    TaskType.CODE_REVIEW: "model_cheap",
+    TaskType.COMPLEX_REASONING: "model_mid",
+    TaskType.WEB_DEV: "model_cheap",
     TaskType.WEB_BROWSING: "model_cheap",
-    TaskType.SYSTEM: "model_mid",
+    TaskType.SYSTEM: "model_cheap",
     TaskType.MEDIA: "model_cheap",
 }
 
