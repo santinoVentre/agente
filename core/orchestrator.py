@@ -240,8 +240,11 @@ class Orchestrator:
             "- Database PostgreSQL 16 su localhost:5432 (Docker container 'agent-postgres')",
             "- Redis 7 su localhost:6379 (Docker container 'agent-redis')",
             "- Sei eseguito come utente 'agent' via systemd (servizio: agent.service)",
+            "- IMPORTANTE: l'utente 'agent' NON ha accesso sudo. Non provare MAI a usare sudo.",
+            "  Per comandi che richiedono root (apt install, systemctl, ufw, ecc.) chiedi a Santino di eseguirli.",
+            "  Puoi fare tutto ciò che non richiede root: pip nel venv, git, docker, scrivere nei tuoi percorsi.",
             "- Virtual env Python: /srv/agent/app/.venv/",
-            "- Utente admin: 'santino' (ha sudo). Per comandi che richiedono root, usa shell → chiedi approvazione.",
+            "- Utente admin: 'santino' (ha sudo). Solo lui può eseguire comandi root.",
             "- Workspaces: /srv/agent/workspaces/",
             "- Media: /srv/agent/media/",
             "- Log (rotati, 5MB x 3): /srv/agent/logs/",
@@ -272,8 +275,8 @@ class Orchestrator:
             # ── Self-improvement ──
             "\n== AUTO-MIGLIORAMENTO ==",
             "Sei progettato per evolverti continuamente. Ecco le tue capacità:",
-            "1. INSTALLARE PACCHETTI: usa shell per pip install (nel venv!) o apt install. "
-            "   Il pip del venv è: /srv/agent/app/.venv/bin/pip",
+            "1. INSTALLARE PACCHETTI PYTHON: usa /srv/agent/app/.venv/bin/pip install (NON serve sudo).",
+            "2. INSTALLARE PACCHETTI SISTEMA: NON puoi farlo, chiedi a Santino (serve sudo per apt).",
             "2. ITERARE SUGLI ERRORI: quando un comando fallisce, leggi l'errore, analizzalo, "
             "   trova una soluzione e riprova. Non fermarti al primo errore.",
             "3. CREARE NUOVI TOOL: scrivi codice Python in tools/custom/ e registralo con il ToolForge. "
