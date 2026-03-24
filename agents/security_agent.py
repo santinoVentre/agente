@@ -75,6 +75,19 @@ class SecurityAgent:
         if "git pull" in cmd_lower and "/srv/agent" in cmd_lower:
             return RiskLevel.LOW, None
 
+        # Whitelisted sudo commands (agent has NOPASSWD sudoers for these)
+        _sudo_whitelist = [
+            "sudo apt update", "sudo apt install -y",
+            "sudo systemctl reload", "sudo systemctl restart", "sudo systemctl start",
+            "sudo systemctl stop", "sudo systemctl status",
+            "sudo cp /tmp/agent-", "sudo ln -sf",
+            "sudo rm /etc/nginx/sites-enabled/",
+            "sudo certbot", "sudo nginx -t",
+            "sudo ufw allow", "sudo ufw deny", "sudo ufw status", "sudo ufw enable",
+        ]
+        if any(cmd_lower.strip().startswith(w) or w in cmd_lower for w in _sudo_whitelist):
+            return RiskLevel.MEDIUM, None
+
         if any(kw in cmd_lower for kw in [
             "apt install", "apt-get install", "apt remove", "pip install", "npm install",
             "systemctl restart", "docker rm", "docker stop",

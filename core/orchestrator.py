@@ -240,9 +240,20 @@ class Orchestrator:
             "- Database PostgreSQL 16 su localhost:5432 (Docker container 'agent-postgres')",
             "- Redis 7 su localhost:6379 (Docker container 'agent-redis')",
             "- Sei eseguito come utente 'agent' via systemd (servizio: agent.service)",
-            "- IMPORTANTE: l'utente 'agent' NON ha accesso sudo. Non provare MAI a usare sudo.",
-            "  Per comandi che richiedono root (apt install, systemctl, ufw, ecc.) chiedi a Santino di eseguirli.",
-            "  Puoi fare tutto ciò che non richiede root: pip nel venv, git, docker, scrivere nei tuoi percorsi.",
+            "- SUDO LIMITATO: hai accesso sudo SENZA password per comandi specifici:",
+            "  • sudo apt update / sudo apt install -y <pacchetto>",
+            "  • sudo systemctl <start|stop|restart|reload|status> <servizio>",
+            "  • sudo cp /tmp/agent-* <destinazione> (per copiare config da /tmp a /etc/)",
+            "  • sudo ln -sf <sorgente> <link> (per link simbolici, es. nginx sites-enabled)",
+            "  • sudo rm /etc/nginx/sites-enabled/<file> (per disabilitare siti nginx)",
+            "  • sudo certbot (per certificati SSL Let's Encrypt)",
+            "  • sudo ufw <allow|deny|status|enable> (per gestire firewall)",
+            "  • sudo nginx -t (per testare config nginx)",
+            "  WORKFLOW PER NGINX: 1) scrivi config in /tmp/agent-<nome>.conf, "
+            "  2) sudo cp /tmp/agent-<nome>.conf /etc/nginx/sites-available/<nome>, "
+            "  3) sudo ln -sf /etc/nginx/sites-available/<nome> /etc/nginx/sites-enabled/<nome>, "
+            "  4) sudo nginx -t, 5) sudo systemctl reload nginx",
+            "  Per tutto il resto che richiede root e NON è in questa lista, chiedi a Santino.",
             "- Virtual env Python: /srv/agent/app/.venv/",
             "- Utente admin: 'santino' (ha sudo). Solo lui può eseguire comandi root.",
             "- Workspaces: /srv/agent/workspaces/",
@@ -276,8 +287,8 @@ class Orchestrator:
             "\n== AUTO-MIGLIORAMENTO ==",
             "Sei progettato per evolverti continuamente. Ecco le tue capacità:",
             "1. INSTALLARE PACCHETTI PYTHON: usa /srv/agent/app/.venv/bin/pip install (NON serve sudo).",
-            "2. INSTALLARE PACCHETTI SISTEMA: NON puoi farlo, chiedi a Santino (serve sudo per apt).",
-            "2. ITERARE SUGLI ERRORI: quando un comando fallisce, leggi l'errore, analizzalo, "
+            "2. INSTALLARE PACCHETTI SISTEMA: usa sudo apt update && sudo apt install -y <pacchetto>.",
+            "3. ITERARE SUGLI ERRORI: quando un comando fallisce, leggi l'errore, analizzalo, "
             "   trova una soluzione e riprova. Non fermarti al primo errore.",
             "3. CREARE NUOVI TOOL: scrivi codice Python in tools/custom/ e registralo con il ToolForge. "
             "   I tool custom non toccano il core del sistema.",
