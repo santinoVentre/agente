@@ -124,39 +124,48 @@ class BaseAgent:
         max_iterations = 15
         continuations = 0
 
-        # Check daily budget before starting
-        if not cost_tracker.check_daily_budget():
-            daily = cost_tracker.get_daily_cost()
-            return (
-                f"⚠️ Budget giornaliero raggiunto (${daily:.2f} / ${cost_tracker.daily_budget:.2f}). "
-                f"Le richieste costose sono bloccate fino a domani."
-            )
+        _task_budget_approved = False   # True once user approves exceeding task budget
+        _daily_budget_approved = False  # True once user approves exceeding daily budget
 
         while True:
             for iteration in range(max_iterations):
-                # Check per-task cost limit
+                # Check per-task cost limit (ask user, don't auto-block)
                 task_cost = cost_tracker.get_task_cost(task_id)
-                if task_cost >= cost_tracker.task_budget:
+                if task_cost >= cost_tracker.task_budget and not _task_budget_approved:
                     log.warning(f"[{self.name}] Task #{task_id} exceeded budget: ${task_cost:.4f}")
-                    await notify(
-                        f"⚠️ <b>Task #{task_id} fermato</b>: budget superato "
-                        f"(${task_cost:.2f} / ${cost_tracker.task_budget:.2f})\n"
-                        f"Iterazioni completate: {iteration}"
+                    await notify_approval_needed(
+                        f"⚠️ <b>Budget task superato</b>\n"
+                        f"Task #{task_id} — Agente: <b>{self.name}</b>\n"
+                        f"💰 Speso: <b>${task_cost:.2f}</b> / ${cost_tracker.task_budget:.2f}\n"
+                        f"Iterazione: {iteration}\n\n"
+                        f"Vuoi continuare o fermare il task?",
+                        task_id=task_id,
                     )
-                    return (
-                        f"Ho raggiunto il limite di costo per questo task "
-                        f"(${task_cost:.2f} / ${cost_tracker.task_budget:.2f}). "
-                        f"Ecco quello che ho fatto finora."
-                    )
+                    approved = await request_approval(task_id, timeout=600.0)
+                    if not approved:
+                        return (
+                            f"Task fermato su tua richiesta. "
+                            f"Costo: ${task_cost:.2f}. Ecco quello che ho fatto finora."
+                        )
+                    _task_budget_approved = True
+                    log.info(f"[{self.name}] User approved exceeding task budget for #{task_id}")
 
-                # Check daily budget
-                if not cost_tracker.check_daily_budget():
-                    daily = cost_tracker.get_daily_cost()
-                    log.warning(f"[{self.name}] Daily budget exceeded: ${daily:.4f}")
-                    await notify(
-                        f"⚠️ <b>Budget giornaliero esaurito</b>: ${daily:.2f} / ${cost_tracker.daily_budget:.2f}"
+                # Check daily budget (ask user, don't auto-block)
+                daily_cost = cost_tracker.get_daily_cost()
+                if daily_cost >= cost_tracker.daily_budget and not _daily_budget_approved:
+                    log.warning(f"[{self.name}] Daily budget exceeded: ${daily_cost:.4f}")
+                    await notify_approval_needed(
+                        f"⚠️ <b>Budget giornaliero superato</b>\n"
+                        f"📅 Speso oggi: <b>${daily_cost:.2f}</b> / ${cost_tracker.daily_budget:.2f}\n"
+                        f"Task attuale: #{task_id}\n\n"
+                        f"Vuoi continuare o fermare?",
+                        task_id=task_id,
                     )
-                    return "Budget giornaliero esaurito. Richieste costose bloccate fino a domani."
+                    approved = await request_approval(task_id, timeout=600.0)
+                    if not approved:
+                        return "Task fermato su tua richiesta (budget giornaliero superato)."
+                    _daily_budget_approved = True
+                    log.info(f"[{self.name}] User approved exceeding daily budget")
 
                 response = await openrouter.chat(
                     model=model,
