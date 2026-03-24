@@ -118,14 +118,7 @@ async def startup():
     # 5. Inject orchestrator into Telegram handlers
     set_orchestrator(orchestrator)
 
-    # 6. Build & start Telegram
-    app = build_app()
-    log.info("Telegram bot starting polling…")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-
-    # 7. Register scheduler jobs and start scheduler
+    # 6. Register scheduler jobs (before Telegram, so failures don't leave orphan tasks)
     from core.monitoring import monitoring_job
     from core.backup import backup_job
     from core.security_hardening import security_audit_job
@@ -155,6 +148,13 @@ async def startup():
 
     scheduler.start()
     log.info("Scheduler started with 3 jobs")
+
+    # 7. Build & start Telegram (last, so everything else is ready)
+    app = build_app()
+    log.info("Telegram bot starting polling…")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
 
     log.info("=== Agent is LIVE ===")
     return app
@@ -205,6 +205,13 @@ def main():
     finally:
         if app:
             loop.run_until_complete(shutdown(app))
+        # Let remaining tasks finish cleanly before closing the loop
+        pending = asyncio.all_tasks(loop)
+        if pending:
+            for t in pending:
+                t.cancel()
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
 
 
