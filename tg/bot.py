@@ -20,6 +20,10 @@ from tg.handlers import (
     cmd_tools,
     cmd_logs,
     cmd_log,
+    cmd_jobs,
+    cmd_job_enable,
+    cmd_job_disable,
+    cmd_help,
     handle_callback,
     handle_document,
     handle_message,
@@ -49,6 +53,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("costs", cmd_costs))
     app.add_handler(CommandHandler("tools", cmd_tools))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("jobs", cmd_jobs))
+    app.add_handler(CommandHandler("job_enable", cmd_job_enable))
+    app.add_handler(CommandHandler("job_disable", cmd_job_disable))
+    app.add_handler(CommandHandler("help", cmd_help))
 
     # Callback queries (approval buttons)
     app.add_handler(CallbackQueryHandler(handle_callback))

@@ -18,5 +18,8 @@ rembg>=2.0,<3
 # Media — video
 ffmpeg-python>=0.2,<1
 
+# System monitoring
+psutil>=5.9,<6
+
 # Misc
 aiofiles>=23.0,<25

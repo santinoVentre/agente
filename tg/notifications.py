@@ -51,6 +51,69 @@ async def notify_error(task_desc: str, error: str):
     await notify(f"❌ <b>{task_desc}</b> fallito\n<code>{error[:500]}</code>")
 
 
+async def send_file(file_path: str, caption: str = ""):
+    """Send a file/document to the owner."""
+    if _app is None or _chat_id is None:
+        log.warning("Notification system not initialized, cannot send file")
+        return
+    try:
+        await _app.bot.send_document(
+            chat_id=_chat_id,
+            document=file_path,
+            caption=caption or None,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.error(f"Failed to send file: {e}")
+
+
+async def send_photo(file_path: str, caption: str = ""):
+    """Send a photo to the owner."""
+    if _app is None or _chat_id is None:
+        log.warning("Notification system not initialized, cannot send photo")
+        return
+    try:
+        await _app.bot.send_photo(
+            chat_id=_chat_id,
+            photo=file_path,
+            caption=caption or None,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.error(f"Failed to send photo: {e}")
+
+
+async def send_video(file_path: str, caption: str = ""):
+    """Send a video to the owner."""
+    if _app is None or _chat_id is None:
+        log.warning("Notification system not initialized, cannot send video")
+        return
+    try:
+        await _app.bot.send_video(
+            chat_id=_chat_id,
+            video=file_path,
+            caption=caption or None,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.error(f"Failed to send video: {e}")
+
+
+async def update_message(message_id: int, text: str):
+    """Edit an existing message."""
+    if _app is None or _chat_id is None:
+        return
+    try:
+        await _app.bot.edit_message_text(
+            chat_id=_chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.error(f"Failed to update message: {e}")
+
+
 async def notify_approval_needed(action_desc: str, task_id: int | None = None):
     """Ask user for approval via inline keyboard. Returns message for callback handling."""
     if _app is None or _chat_id is None:

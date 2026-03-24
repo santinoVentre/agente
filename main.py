@@ -12,6 +12,7 @@ from core.orchestrator import Orchestrator
 from core.openrouter_client import openrouter
 from core.task_manager import task_manager
 from core.tool_registry import tool_registry
+from core.scheduler import scheduler
 from tg.bot import build_app
 from tg.handlers import set_orchestrator
 from tg.notifications import set_app
@@ -25,6 +26,8 @@ from tools.github_tool import GitHubTool
 from tools.vercel_tool import VercelTool
 from tools.image_tool import ImageTool
 from tools.video_tool import VideoTool
+from tools.telegram_tool import TelegramTool
+from tools.monitoring_tool import MonitoringTool
 
 # Agents
 from agents.webdev_agent import WebDevAgent
@@ -52,30 +55,37 @@ def _build_agents() -> dict[str, object]:
     vercel = VercelTool()
     image = ImageTool()
     video = VideoTool()
+    telegram = TelegramTool()
+    monitoring = MonitoringTool()
 
-    # System agent — shell + filesystem
+    # System agent — shell + filesystem + telegram + monitoring
     system_agent = SystemAgent()
     system_agent.register_tool(shell)
     system_agent.register_tool(filesystem)
+    system_agent.register_tool(telegram)
+    system_agent.register_tool(monitoring)
 
-    # WebDev agent — filesystem + github + vercel + shell
+    # WebDev agent — filesystem + github + vercel + shell + telegram
     webdev_agent = WebDevAgent()
     webdev_agent.register_tool(filesystem)
     webdev_agent.register_tool(github)
     webdev_agent.register_tool(vercel)
     webdev_agent.register_tool(shell)
+    webdev_agent.register_tool(telegram)
 
-    # Browser agent — browser + filesystem
+    # Browser agent — browser + filesystem + telegram
     browser_agent = BrowserAgent()
     browser_agent.register_tool(browser)
     browser_agent.register_tool(filesystem)
+    browser_agent.register_tool(telegram)
 
-    # Media agent — image + video + filesystem + shell
+    # Media agent — image + video + filesystem + shell + telegram
     media_agent = MediaAgent()
     media_agent.register_tool(image)
     media_agent.register_tool(video)
     media_agent.register_tool(filesystem)
     media_agent.register_tool(shell)
+    media_agent.register_tool(telegram)
 
     return {
         a.name: a
@@ -115,6 +125,37 @@ async def startup():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
+    # 7. Register scheduler jobs and start scheduler
+    from core.monitoring import monitoring_job
+    from core.backup import backup_job
+    from core.security_hardening import security_audit_job
+
+    scheduler.register_handler("monitoring", monitoring_job)
+    scheduler.register_handler("backup", backup_job)
+    scheduler.register_handler("security_audit", security_audit_job)
+
+    await scheduler.ensure_job(
+        name="monitoring",
+        handler_name="monitoring",
+        interval_seconds=300,          # every 5 minutes
+        description="Raccolta metriche sistema e alert soglie",
+    )
+    await scheduler.ensure_job(
+        name="backup",
+        handler_name="backup",
+        interval_seconds=86400,        # daily
+        description="Backup DB + .env + custom tools su GitHub",
+    )
+    await scheduler.ensure_job(
+        name="security_audit",
+        handler_name="security_audit",
+        interval_seconds=21600,        # every 6 hours
+        description="Controllo sicurezza VPS (SSH, firewall, fail2ban, porte)",
+    )
+
+    scheduler.start()
+    log.info("Scheduler started with 3 jobs")
+
     log.info("=== Agent is LIVE ===")
     return app
 
@@ -122,6 +163,9 @@ async def startup():
 async def shutdown(app):
     """Graceful shutdown."""
     log.info("Shutting down…")
+
+    scheduler.stop()
+
     try:
         if app.updater and app.updater.running:
             await app.updater.stop()

@@ -34,6 +34,12 @@ def md_bold_to_html(text: str) -> str:
     # Replace **text** or *text* with <b>text</b>
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"\*(.+?)\*", r"<b>\1</b>", text)
+    # Italics: _text_ → <i>text</i> (but not __dunder__)
+    text = re.sub(r"(?<![_])_([^_]+?)_(?![_])", r"<i>\1</i>", text)
+    # Inline code: `text` → <code>text</code>
+    text = re.sub(r"`([^`]+?)`", r"<code>\1</code>", text)
+    # Code blocks: ```...``` → <pre>...</pre>
+    text = re.sub(r"```(?:\w+)?\n?(.*?)```", r"<pre>\1</pre>", text, flags=re.DOTALL)
     return text
 
 
@@ -173,6 +179,80 @@ async def cmd_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("File di log non trovato.")
         return
     await update.message.reply_document(document=str(fpath), filename=fpath.name)
+
+
+# ── Scheduler commands ───────────────────────────────────────────────────
+
+
+async def cmd_jobs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """List all scheduled jobs."""
+    if not _is_authorized(update):
+        return
+    from core.scheduler import scheduler
+    jobs = await scheduler.list_jobs()
+    if not jobs:
+        await update.message.reply_text("Nessun job schedulato.")
+        return
+    lines = ["📅 <b>Job schedulati:</b>"]
+    for j in jobs:
+        status = "✅" if j["enabled"] else "⏸️"
+        interval_min = j["interval"] // 60
+        lines.append(
+            f"{status} <b>{j['name']}</b> — ogni {interval_min}min\n"
+            f"    Runs: {j['runs']} | Ultimo: {j['last_run']} | Prossimo: {j['next_run']}\n"
+            f"    {j['last_result']}"
+        )
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_job_enable(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Uso: /job_enable <nome_job>")
+        return
+    from core.scheduler import scheduler
+    found = await scheduler.set_enabled(ctx.args[0], True)
+    if found:
+        await update.message.reply_text(f"✅ Job <b>{ctx.args[0]}</b> abilitato.", parse_mode="HTML")
+    else:
+        await update.message.reply_text(f"Job '{ctx.args[0]}' non trovato.")
+
+
+async def cmd_job_disable(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Uso: /job_disable <nome_job>")
+        return
+    from core.scheduler import scheduler
+    found = await scheduler.set_enabled(ctx.args[0], False)
+    if found:
+        await update.message.reply_text(f"⏸️ Job <b>{ctx.args[0]}</b> disabilitato.", parse_mode="HTML")
+    else:
+        await update.message.reply_text(f"Job '{ctx.args[0]}' non trovato.")
+
+
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    await update.message.reply_text(
+        "🤖 <b>Comandi disponibili:</b>\n\n"
+        "/start — info iniziale\n"
+        "/status — stato agenti e task\n"
+        "/tasks — lista task attivi\n"
+        "/costs — riepilogo costi API\n"
+        "/tools — lista tool disponibili\n"
+        "/cancel &lt;id&gt; — annulla un task\n"
+        "/logs — lista file di log\n"
+        "/log &lt;file&gt; — scarica un log\n"
+        "/jobs — lista job schedulati\n"
+        "/job_enable &lt;nome&gt; — abilita job\n"
+        "/job_disable &lt;nome&gt; — disabilita job\n"
+        "/help — questo messaggio\n\n"
+        "Oppure scrivi qualsiasi richiesta in linguaggio naturale!",
+        parse_mode="HTML",
+    )
 
 
 # ── Callback queries (approve/reject) ───────────────────────────────────
