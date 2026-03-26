@@ -58,6 +58,7 @@ class Config:
     model_cheap: str = field(default_factory=lambda: _env("MODEL_ROUTING_CHEAP", "google/gemini-2.0-flash-001"))
     model_mid: str = field(default_factory=lambda: _env("MODEL_ROUTING_MID", "qwen/qwen3-235b-a22b"))
     model_expensive: str = field(default_factory=lambda: _env("MODEL_ROUTING_EXPENSIVE", "anthropic/claude-sonnet-4-20250514"))
+    model_autonomous: str = field(default_factory=lambda: _env("MODEL_AUTONOMOUS", "qwen/qwen3-235b-a22b"))
     model_code_generation: str = field(default_factory=lambda: _env("MODEL_CODE_GENERATION", "moonshotai/kimi-k2"))
     model_tool_execution: str = field(default_factory=lambda: _env("MODEL_TOOL_EXECUTION", "google/gemini-2.0-flash-001"))
 
