@@ -63,19 +63,9 @@ class SecurityAgent:
             if path in cmd_lower:
                 return RiskLevel.CRITICAL, f"Access to protected system path: {path}"
 
-        # Destructive commands
-        if any(kw in cmd_lower for kw in ["rm ", "kill -9", "pkill", "systemctl stop"]):
-            return RiskLevel.HIGH, None
-
-        # Self-management (agent restarting itself, installing in its own venv)
-        if "systemctl restart agent" in cmd_lower:
-            return RiskLevel.LOW, None
-        if ".venv/bin/pip install" in cmd_lower:
-            return RiskLevel.LOW, None
-        if "git pull" in cmd_lower and "/srv/agent" in cmd_lower:
-            return RiskLevel.LOW, None
-
-        # Whitelisted sudo commands (agent has NOPASSWD sudoers for these)
+        # Whitelisted sudo commands — checked BEFORE generic destructive patterns so that
+        # explicitly allowed commands like "sudo rm /etc/nginx/sites-enabled/…" are not
+        # incorrectly escalated to HIGH.
         _sudo_whitelist = [
             "sudo apt update", "sudo apt install -y",
             "sudo systemctl reload", "sudo systemctl restart", "sudo systemctl start",
@@ -87,6 +77,18 @@ class SecurityAgent:
         ]
         if any(cmd_lower.strip().startswith(w) or w in cmd_lower for w in _sudo_whitelist):
             return RiskLevel.MEDIUM, None
+
+        # Self-management (agent restarting itself, installing in its own venv)
+        if "systemctl restart agent" in cmd_lower:
+            return RiskLevel.LOW, None
+        if ".venv/bin/pip install" in cmd_lower:
+            return RiskLevel.LOW, None
+        if "git pull" in cmd_lower and "/srv/agent" in cmd_lower:
+            return RiskLevel.LOW, None
+
+        # Destructive commands
+        if any(kw in cmd_lower for kw in ["rm ", "kill -9", "pkill", "systemctl stop"]):
+            return RiskLevel.HIGH, None
 
         if any(kw in cmd_lower for kw in [
             "apt install", "apt-get install", "apt remove", "pip install", "npm install",

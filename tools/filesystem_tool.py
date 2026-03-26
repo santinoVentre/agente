@@ -44,6 +44,11 @@ def _is_safe_path(path: str, action: str = "read") -> bool:
     if str(resolved).startswith("/tmp"):
         return True
 
+    # /etc/nginx is readable (agent can inspect configs); writes go via sudo cp workflow
+    if str(resolved).startswith("/etc/nginx"):
+        if action in ("read", "list", "exists"):
+            return True
+
     return False
 
 
