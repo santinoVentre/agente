@@ -11,7 +11,7 @@ from core.model_router import TaskType, get_model_for_task
 from core.task_manager import task_manager
 from db.models import ActionVerdict, RiskLevel, TaskStatus
 from agents.security_agent import security_agent
-from tg.notifications import notify, notify_approval_needed, notify_progress
+from tg.notifications import notify, notify_approval_needed
 from tg.handlers import request_approval
 from utils.cost_tracker import cost_tracker
 from utils.logging import setup_logging
@@ -150,6 +150,8 @@ class BaseAgent:
         last_tool_signature = ""
         loop = asyncio.get_running_loop()
         last_heartbeat = loop.time()
+        length_continuations = 0
+        max_length_continuations = 2
 
         _task_budget_approved = False   # True once user approves exceeding task budget
         _daily_budget_approved = False  # True once user approves exceeding daily budget
@@ -160,12 +162,6 @@ class BaseAgent:
                 if now - last_heartbeat >= HEARTBEAT_SECONDS:
                     progress = min(90, 10 + iteration * 5)
                     await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=progress)
-                    await notify(
-                        f"🔎 Task #{task_id} in corso\n"
-                        f"Agente: <b>{self.name}</b>\n"
-                        f"Iterazione: {iteration + 1}/{max_iterations}\n"
-                        f"Progresso stimato: {progress}%"
-                    )
                     last_heartbeat = now
 
                 # Check per-task cost limit (ask user, don't auto-block)
@@ -281,6 +277,20 @@ class BaseAgent:
 
                 # Final text response
                 content = message.get("content", "")
+
+                # If output was truncated by token limit, ask model to continue seamlessly.
+                if finish_reason == "length" and content and length_continuations < max_length_continuations:
+                    length_continuations += 1
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Continua esattamente dal punto in cui eri rimasto, "
+                            "senza ripetere le parti gia' inviate."
+                        ),
+                    })
+                    continue
+
                 return content
 
             # Reached iteration limit — check if we can ask for continuation

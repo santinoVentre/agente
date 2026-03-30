@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from datetime import datetime, timezone
 from typing import Any
 
 from config import config
@@ -77,6 +79,16 @@ class Orchestrator:
             agent_name = next(iter(self._agents), "system")
         return agent_name
 
+    def _task_memory_key(self, task_id: int, user_message: str) -> str:
+        """Build a readable key for long-term task memory entries."""
+        raw = user_message.strip().lower()[:80]
+        slug = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+        if not slug:
+            slug = "attivita"
+        slug = slug[:48]
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        return f"{slug}_{ts}"
+
     # ── Main handler ─────────────────────────────────────────────────
 
     async def handle_user_message(
@@ -148,7 +160,7 @@ class Orchestrator:
             await memory.save_message(task.user_id, "assistant", response, model=model)
             await memory.remember(
                 task.user_id,
-                key=f"task_{task.id}",
+                key=self._task_memory_key(task.id, message),
                 value=(
                     f"type={task.task_type}; agent={task.agent_assigned}; "
                     f"request={message[:240]}; outcome={response[:600]}"
@@ -177,14 +189,14 @@ class Orchestrator:
                 await memory.save_message(task.user_id, "assistant", response, model=model)
                 await memory.remember(
                     task.user_id,
-                    key=f"task_{task.id}",
+                    key=self._task_memory_key(task.id, message),
                     value=(
                         f"type={task.task_type}; agent={task.agent_assigned}; "
                         f"request={message[:240]}; outcome={response[:600]}"
                     ),
                     category="task_history",
                 )
-                await notify_done(message[:60], response[:500])
+                await notify_done(message[:60], response)
             except Exception as e:
                 log.error(f"Task #{task.id} failed: {e}", exc_info=True)
                 await task_manager.fail_task(task.id, str(e))
@@ -195,12 +207,8 @@ class Orchestrator:
         atask = asyncio.create_task(_background())
         task_manager.register_running_task(task.id, atask)
 
-        return (
-            f"🔄 Task <b>#{task.id}</b> avviato\n"
-            f"Tipo: <code>{task.task_type}</code>\n"
-            f"Agente: <code>{task.agent_assigned}</code>\n"
-            f"Ti aggiorno quando finisco."
-        )
+        # Keep Telegram quiet for operational startup messages.
+        return ""
 
     # ── Status queries ───────────────────────────────────────────────
 

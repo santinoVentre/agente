@@ -120,8 +120,25 @@ class OpenRouterClient:
         usage = response.get("usage", {})
         tokens_in = usage.get("prompt_tokens", 0)
         tokens_out = usage.get("completion_tokens", 0)
-        # OpenRouter returns cost in the response header or we estimate
-        cost = float(response.get("usage", {}).get("total_cost", 0) or 0)
+        # OpenRouter fields can vary by provider/model; fallback to estimator in cost_tracker.
+        raw_cost = (
+            usage.get("total_cost")
+            or usage.get("total_cost_usd")
+            or usage.get("cost")
+            or response.get("total_cost")
+            or response.get("cost")
+            or 0
+        )
+        if not raw_cost:
+            prompt_cost = usage.get("prompt_cost") or 0
+            completion_cost = usage.get("completion_cost") or 0
+            raw_cost = (prompt_cost or 0) + (completion_cost or 0)
+
+        try:
+            cost = float(raw_cost or 0)
+        except (TypeError, ValueError):
+            cost = 0.0
+
         await cost_tracker.record(model, tokens_in, tokens_out, cost, task_id=task_id)
 
     async def close(self):
