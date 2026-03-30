@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -18,6 +19,9 @@ from utils.logging import setup_logging
 log = setup_logging("base_agent")
 
 MAX_CONTINUATIONS = 2  # Max times user can approve continuing past iteration limit
+HEARTBEAT_SECONDS = 45
+MAX_SAME_TOOL_CALLS = 3
+MAX_CONSECUTIVE_TOOL_ERRORS = 4
 
 
 class BaseAgent:
@@ -35,6 +39,21 @@ class BaseAgent:
 
     def get_tool_schemas(self) -> list[dict]:
         return [t.to_openai_schema() for t in self._tools.values()]
+
+    async def _request_user_approval(
+        self,
+        task_id: int,
+        message_html: str,
+        timeout: float = 600.0,
+        progress: int | None = None,
+    ) -> bool:
+        """Set explicit waiting state and ask the owner to approve/reject."""
+        await task_manager.set_waiting_approval(task_id, reason=message_html, progress=progress)
+        await notify_approval_needed(message_html, task_id=task_id)
+        approved = await request_approval(task_id, timeout=timeout)
+        if approved:
+            await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=progress)
+        return approved
 
     async def execute_tool(
         self, tool_name: str, parameters: dict, task_id: int | None = None
@@ -67,8 +86,11 @@ class BaseAgent:
         if verdict == ActionVerdict.PENDING:
             # Request approval via Telegram
             desc = f"<b>{tool_name}</b>\n<code>{json.dumps(parameters, default=str)[:300]}</code>"
-            await notify_approval_needed(desc, task_id=task_id or 0)
-            approved = await request_approval(task_id or 0)
+            if task_id is not None:
+                approved = await self._request_user_approval(task_id, desc, timeout=600.0)
+            else:
+                await notify_approval_needed(desc, task_id=task_id or 0)
+                approved = await request_approval(task_id or 0)
             if not approved:
                 await task_manager.log_action(
                     task_id, self.name, tool_name,
@@ -123,25 +145,43 @@ class BaseAgent:
         tool_schemas = self.get_tool_schemas()
         max_iterations = 15
         continuations = 0
+        consecutive_tool_errors = 0
+        same_tool_call_streak = 0
+        last_tool_signature = ""
+        loop = asyncio.get_running_loop()
+        last_heartbeat = loop.time()
 
         _task_budget_approved = False   # True once user approves exceeding task budget
         _daily_budget_approved = False  # True once user approves exceeding daily budget
 
         while True:
             for iteration in range(max_iterations):
+                now = loop.time()
+                if now - last_heartbeat >= HEARTBEAT_SECONDS:
+                    progress = min(90, 10 + iteration * 5)
+                    await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=progress)
+                    await notify(
+                        f"🔎 Task #{task_id} in corso\n"
+                        f"Agente: <b>{self.name}</b>\n"
+                        f"Iterazione: {iteration + 1}/{max_iterations}\n"
+                        f"Progresso stimato: {progress}%"
+                    )
+                    last_heartbeat = now
+
                 # Check per-task cost limit (ask user, don't auto-block)
                 task_cost = cost_tracker.get_task_cost(task_id)
                 if task_cost >= cost_tracker.task_budget and not _task_budget_approved:
                     log.warning(f"[{self.name}] Task #{task_id} exceeded budget: ${task_cost:.4f}")
-                    await notify_approval_needed(
+                    approved = await self._request_user_approval(
+                        task_id,
                         f"⚠️ <b>Budget task superato</b>\n"
                         f"Task #{task_id} — Agente: <b>{self.name}</b>\n"
                         f"💰 Speso: <b>${task_cost:.2f}</b> / ${cost_tracker.task_budget:.2f}\n"
                         f"Iterazione: {iteration}\n\n"
                         f"Vuoi continuare o fermare il task?",
-                        task_id=task_id,
+                        timeout=600.0,
+                        progress=min(90, 10 + iteration * 5),
                     )
-                    approved = await request_approval(task_id, timeout=600.0)
                     if not approved:
                         return (
                             f"Task fermato su tua richiesta. "
@@ -154,14 +194,15 @@ class BaseAgent:
                 daily_cost = cost_tracker.get_daily_cost()
                 if daily_cost >= cost_tracker.daily_budget and not _daily_budget_approved:
                     log.warning(f"[{self.name}] Daily budget exceeded: ${daily_cost:.4f}")
-                    await notify_approval_needed(
+                    approved = await self._request_user_approval(
+                        task_id,
                         f"⚠️ <b>Budget giornaliero superato</b>\n"
                         f"📅 Speso oggi: <b>${daily_cost:.2f}</b> / ${cost_tracker.daily_budget:.2f}\n"
                         f"Task attuale: #{task_id}\n\n"
                         f"Vuoi continuare o fermare?",
-                        task_id=task_id,
+                        timeout=600.0,
+                        progress=min(90, 10 + iteration * 5),
                     )
-                    approved = await request_approval(task_id, timeout=600.0)
                     if not approved:
                         return "Task fermato su tua richiesta (budget giornaliero superato)."
                     _daily_budget_approved = True
@@ -192,8 +233,40 @@ class BaseAgent:
                         except json.JSONDecodeError:
                             args = {}
 
+                        tool_signature = f"{tool_name}:{json.dumps(args, sort_keys=True, default=str)[:500]}"
+                        if tool_signature == last_tool_signature:
+                            same_tool_call_streak += 1
+                        else:
+                            same_tool_call_streak = 1
+                        last_tool_signature = tool_signature
+
+                        if same_tool_call_streak > MAX_SAME_TOOL_CALLS:
+                            await notify(
+                                f"⚠️ Task #{task_id}: rilevata possibile iterazione ripetitiva su tool "
+                                f"<b>{tool_name}</b>. Mi fermo e chiedo nuova direzione."
+                            )
+                            return (
+                                "Mi sono fermato per evitare loop silenziosi: "
+                                f"lo stesso tool ({tool_name}) e' stato chiamato troppe volte con input simile."
+                            )
+
                         log.info(f"[{self.name}] Tool call: {tool_name}({args})")
                         result = await self.execute_tool(tool_name, args, task_id)
+
+                        if not result.get("success", True):
+                            consecutive_tool_errors += 1
+                        else:
+                            consecutive_tool_errors = 0
+
+                        if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS:
+                            await notify(
+                                f"⚠️ Task #{task_id}: troppi errori consecutivi ({consecutive_tool_errors}) "
+                                "durante le tool call. Richiedo tua indicazione."
+                            )
+                            return (
+                                "Mi sono fermato dopo diversi errori consecutivi nelle azioni automatiche. "
+                                "Indicami se vuoi che cambi strategia o proceda in modo diverso."
+                            )
 
                         messages.append({
                             "role": "tool",
@@ -225,15 +298,16 @@ class BaseAgent:
                 )
 
             task_cost = cost_tracker.get_task_cost(task_id)
-            await notify_approval_needed(
+            approved = await self._request_user_approval(
+                task_id,
                 f"⏸️ Limite iterazioni raggiunto ({max_iterations})\n"
                 f"Agente: <b>{self.name}</b> — Task #{task_id}\n"
                 f"💰 Costo finora: <b>${task_cost:.2f}</b> / ${cost_tracker.task_budget:.2f}\n"
                 f"Continuazione {continuations}/{MAX_CONTINUATIONS}\n"
                 f"Posso continuare?",
-                task_id=task_id,
+                timeout=600.0,
+                progress=95,
             )
-            approved = await request_approval(task_id, timeout=600.0)
             if not approved:
                 return "Ho raggiunto il limite massimo di iterazioni. Ecco quello che ho fatto finora."
             log.info(f"[{self.name}] User approved continuation {continuations}/{MAX_CONTINUATIONS} for task #{task_id}")

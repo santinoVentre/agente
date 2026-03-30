@@ -85,6 +85,18 @@ class TaskManager:
             update_map["progress"] = str(progress)
         await r.hset(f"task:{task_id}", mapping=update_map)
 
+    async def set_waiting_approval(
+        self,
+        task_id: int,
+        reason: str | None = None,
+        progress: int | None = None,
+    ):
+        """Mark task as waiting for owner approval and expose reason in Redis."""
+        await self.update_task_status(task_id, TaskStatus.WAITING_APPROVAL, progress=progress)
+        if reason:
+            r = await self._get_redis()
+            await r.hset(f"task:{task_id}", mapping={"waiting_reason": reason[:500]})
+
     async def complete_task(self, task_id: int, result: dict | None = None, cost: float = 0.0):
         async with async_session() as session:
             await session.execute(

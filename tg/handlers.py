@@ -48,6 +48,31 @@ def _is_authorized(update: Update) -> bool:
     return user is not None and user.id == config.allowed_telegram_user_id
 
 
+async def _reply_html_safe(message_obj, text: str):
+    """Send long responses safely to Telegram with fallback to plain text."""
+    if not text:
+        return
+
+    max_len = 3500
+    chunks = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, max_len)
+        if split_at <= 0:
+            split_at = max_len
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip("\n")
+
+    for chunk in chunks:
+        try:
+            await message_obj.reply_text(chunk, parse_mode="HTML")
+        except Exception:
+            await message_obj.reply_text(chunk)
+
+
 # ── Commands ─────────────────────────────────────────────────────────────
 
 
@@ -61,6 +86,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/tasks — lista task attivi\n"
         "/costs — riepilogo costi API\n"
         "/tools — lista tool disponibili\n"
+        "/projects — lista progetti registrati\n"
         "/cancel &lt;id&gt; — annulla un task",
         parse_mode="HTML",
     )
@@ -100,6 +126,29 @@ async def cmd_tools(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     tools_text = await _orchestrator.get_tools_text()
     await update.message.reply_text(tools_text, parse_mode="HTML")
+
+
+async def cmd_projects(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """List recent projects from the persistent project registry."""
+    if not _is_authorized(update):
+        return
+
+    from core.project_registry import project_registry
+
+    rows = await project_registry.list_projects(limit=20)
+    if not rows:
+        await update.message.reply_text("Nessun progetto registrato.")
+        return
+
+    lines = ["📦 <b>Progetti registrati:</b>"]
+    for r in rows:
+        lines.append(
+            f"• <b>{r.name}</b> [{r.status}]\n"
+            f"  repo: <code>{r.github_repo or '-'}</code>\n"
+            f"  domain: <code>{r.domain or '-'}</code>\n"
+            f"  deploy: <code>{r.deploy_url or '-'}</code>"
+        )
+    await _reply_html_safe(update.message, "\n".join(lines))
 
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -216,10 +265,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if response:
         # Convert markdown bold to HTML bold
         response = md_bold_to_html(response)
-        # Split long messages (Telegram limit: 4096 chars)
-        for i in range(0, len(response), 4000):
-            chunk = response[i : i + 4000]
-            await update.message.reply_text(chunk, parse_mode="HTML")
+        await _reply_html_safe(update.message, response)
 
 # ── Logs command ─────────────────────────────────────────────────
 async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -314,6 +360,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/costs — riepilogo costi API\n"
         "/budget — mostra budget (o /budget task|daily X)\n"
         "/tools — lista tool disponibili\n"
+        "/projects — lista progetti registrati\n"
         "/cancel &lt;id&gt; — annulla un task\n"
         "/force_cancel &lt;id&gt; — forza cancellazione task bloccato\n"
         "/logs — lista file di log\n"
@@ -398,7 +445,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         attachments=[str(file_path)],
     )
     if response:
-        await update.message.reply_text(response, parse_mode="HTML")
+        await _reply_html_safe(update.message, response)
 
 
 async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -423,4 +470,4 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         attachments=[str(file_path)],
     )
     if response:
-        await update.message.reply_text(response, parse_mode="HTML")
+        await _reply_html_safe(update.message, response)

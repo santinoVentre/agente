@@ -13,6 +13,7 @@ from core.openrouter_client import openrouter
 from core.task_manager import task_manager
 from core.tool_registry import tool_registry
 from core.scheduler import scheduler
+from core.inventory import collect_infrastructure_snapshot, inventory_job
 from tg.bot import build_app
 from tg.handlers import set_orchestrator
 from tg.notifications import set_app
@@ -28,6 +29,7 @@ from tools.image_tool import ImageTool
 from tools.video_tool import VideoTool
 from tools.telegram_tool import TelegramTool
 from tools.monitoring_tool import MonitoringTool
+from tools.project_registry_tool import ProjectRegistryTool
 
 # Agents
 from agents.webdev_agent import WebDevAgent
@@ -57,6 +59,7 @@ def _build_agents() -> dict[str, object]:
     video = VideoTool()
     telegram = TelegramTool()
     monitoring = MonitoringTool()
+    project_registry = ProjectRegistryTool()
 
     # System agent — shell + filesystem + telegram + monitoring
     system_agent = SystemAgent()
@@ -64,6 +67,7 @@ def _build_agents() -> dict[str, object]:
     system_agent.register_tool(filesystem)
     system_agent.register_tool(telegram)
     system_agent.register_tool(monitoring)
+    system_agent.register_tool(project_registry)
 
     # WebDev agent — filesystem + github + vercel + shell + telegram
     webdev_agent = WebDevAgent()
@@ -72,6 +76,7 @@ def _build_agents() -> dict[str, object]:
     webdev_agent.register_tool(vercel)
     webdev_agent.register_tool(shell)
     webdev_agent.register_tool(telegram)
+    webdev_agent.register_tool(project_registry)
 
     # Browser agent — browser + filesystem + telegram
     browser_agent = BrowserAgent()
@@ -86,6 +91,7 @@ def _build_agents() -> dict[str, object]:
     media_agent.register_tool(filesystem)
     media_agent.register_tool(shell)
     media_agent.register_tool(telegram)
+    media_agent.register_tool(project_registry)
 
     return {
         a.name: a
@@ -108,6 +114,13 @@ async def startup():
     await tool_registry.load_all()
     log.info(f"Tool registry loaded ({tool_registry.count()} tools)")
 
+    # 3b. Refresh infrastructure snapshot early (prompt grounding)
+    try:
+        await collect_infrastructure_snapshot(source="startup")
+        log.info("Infrastructure snapshot captured")
+    except Exception as e:
+        log.warning(f"Infrastructure snapshot failed at startup: {e}")
+
     # 4. Build agents + orchestrator
     agents = _build_agents()
     orchestrator = Orchestrator()
@@ -126,6 +139,7 @@ async def startup():
     scheduler.register_handler("monitoring", monitoring_job)
     scheduler.register_handler("backup", backup_job)
     scheduler.register_handler("security_audit", security_audit_job)
+    scheduler.register_handler("inventory", inventory_job)
 
     await scheduler.ensure_job(
         name="monitoring",
@@ -144,6 +158,12 @@ async def startup():
         handler_name="security_audit",
         interval_seconds=21600,        # every 6 hours
         description="Controllo sicurezza VPS (SSH, firewall, fail2ban, porte)",
+    )
+    await scheduler.ensure_job(
+        name="inventory",
+        handler_name="inventory",
+        interval_seconds=900,          # every 15 minutes
+        description="Snapshot infrastrutturale persistente (servizi, risorse, integrazioni)",
     )
 
     scheduler.start()

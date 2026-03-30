@@ -200,3 +200,45 @@ class ScheduledJob(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class InfrastructureSnapshot(Base):
+    """Point-in-time snapshot of VPS infrastructure and runtime context."""
+
+    __tablename__ = "infrastructure_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(50), default="scheduler")
+    hostname: Mapped[str | None] = mapped_column(String(255))
+    os_name: Mapped[str | None] = mapped_column(String(120))
+    kernel: Mapped[str | None] = mapped_column(String(255))
+    python_version: Mapped[str | None] = mapped_column(String(50))
+    data: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class ProjectRegistry(Base):
+    """Persistent project registry to track repos, domains, and deploy status."""
+
+    __tablename__ = "project_registry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    workspace_path: Mapped[str | None] = mapped_column(String(500))
+    github_repo: Mapped[str | None] = mapped_column(String(255))
+    domain: Mapped[str | None] = mapped_column(String(255))
+    deploy_provider: Mapped[str | None] = mapped_column(String(80))
+    deploy_url: Mapped[str | None] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(50), default="active", index=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_deployed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

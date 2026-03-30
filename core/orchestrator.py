@@ -8,8 +8,10 @@ from typing import Any
 
 from config import config
 from core.memory import memory
+from core.inventory import get_latest_snapshot_summary
 from core.model_router import CLASSIFICATION_PROMPT, TaskType, get_model_for_task
 from core.openrouter_client import openrouter
+from core.project_registry import project_registry
 from core.task_manager import task_manager
 from db.models import TaskStatus
 from tg.notifications import notify, notify_done, notify_error
@@ -124,7 +126,7 @@ class Orchestrator:
         memories = await memory.recall_all(user_id)
         memory_context = memory.format_memories_for_prompt(memories)
 
-        system_prompt = self._build_system_prompt(agent_name, memory_context, attachments)
+        system_prompt = await self._build_system_prompt(agent_name, memory_context, attachments)
 
         # For quick tasks, run synchronously; for complex ones, run in background
         if task_type in (TaskType.SIMPLE_CHAT, TaskType.ROUTING, TaskType.SUMMARIZATION):
@@ -144,6 +146,15 @@ class Orchestrator:
             )
             await task_manager.complete_task(task.id, cost=cost_tracker.total_cost)
             await memory.save_message(task.user_id, "assistant", response, model=model)
+            await memory.remember(
+                task.user_id,
+                key=f"task_{task.id}",
+                value=(
+                    f"type={task.task_type}; agent={task.agent_assigned}; "
+                    f"request={message[:240]}; outcome={response[:600]}"
+                ),
+                category="task_history",
+            )
             return response
         except Exception as e:
             log.error(f"Task #{task.id} failed: {e}", exc_info=True)
@@ -164,6 +175,15 @@ class Orchestrator:
                 )
                 await task_manager.complete_task(task.id, cost=cost_tracker.total_cost)
                 await memory.save_message(task.user_id, "assistant", response, model=model)
+                await memory.remember(
+                    task.user_id,
+                    key=f"task_{task.id}",
+                    value=(
+                        f"type={task.task_type}; agent={task.agent_assigned}; "
+                        f"request={message[:240]}; outcome={response[:600]}"
+                    ),
+                    category="task_history",
+                )
                 await notify_done(message[:60], response[:500])
             except Exception as e:
                 log.error(f"Task #{task.id} failed: {e}", exc_info=True)
@@ -219,9 +239,21 @@ class Orchestrator:
 
     # ── System prompt ────────────────────────────────────────────────
 
-    def _build_system_prompt(
+    async def _build_system_prompt(
         self, agent_name: str, memory_context: str, attachments: list[str] | None
     ) -> str:
+        try:
+            infra_summary = await get_latest_snapshot_summary()
+        except Exception as e:
+            log.warning(f"Failed to load infrastructure snapshot summary: {e}")
+            infra_summary = "Snapshot infrastrutturale non disponibile"
+
+        try:
+            projects_summary = await project_registry.get_recent_projects_summary(limit=6)
+        except Exception as e:
+            log.warning(f"Failed to load projects summary: {e}")
+            projects_summary = "Registro progetti non disponibile"
+
         parts = [
             # ── Identità ──
             "Sei l'agente personale di Santino. Sei un sistema autonomo che vive su un "
@@ -259,6 +291,12 @@ class Orchestrator:
             "- Workspaces: /srv/agent/workspaces/",
             "- Media: /srv/agent/media/",
             "- Log (rotati, 5MB x 3): /srv/agent/logs/",
+
+            "\n== SNAPSHOT INFRASTRUTTURALE ATTUALE ==",
+            infra_summary,
+
+            "\n== PROGETTI REGISTRATI RECENTI ==",
+            projects_summary,
 
             # ── Architettura del sistema ──
             "\n== ARCHITETTURA ==",
