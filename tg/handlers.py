@@ -202,6 +202,24 @@ async def cmd_force_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_cancel_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Cancel ALL active/stuck tasks at once."""
+    if not _is_authorized(update):
+        return
+    from core.task_manager import task_manager
+    # Also reject all pending approvals
+    for task_id, future in list(_pending_approvals.items()):
+        if not future.done():
+            future.set_result(False)
+    _pending_approvals.clear()
+    count = await task_manager.cancel_all_active()
+    await update.message.reply_text(
+        f"🗑️ <b>{count} task cancellati.</b>"
+        if count else "✅ Nessun task attivo da cancellare.",
+        parse_mode="HTML",
+    )
+
+
 async def cmd_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show/set cost budgets."""
     if not _is_authorized(update):
@@ -362,6 +380,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/tools — lista tool disponibili\n"
         "/projects — lista progetti registrati\n"
         "/cancel &lt;id&gt; — annulla un task\n"
+        "/cancel_all — cancella tutti i task attivi/bloccati\n"
         "/force_cancel &lt;id&gt; — forza cancellazione task bloccato\n"
         "/logs — lista file di log\n"
         "/log &lt;file&gt; — scarica un log\n"

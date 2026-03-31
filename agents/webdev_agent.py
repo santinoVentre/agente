@@ -1,39 +1,239 @@
-"""WebDev Agent — creates websites, pushes to GitHub, deploys on Vercel."""
+"""WebDev Agent — planner → builder → reviewer pipeline per la creazione di siti web."""
 
 from __future__ import annotations
 
-from core.model_router import TaskType
+import json
+
+from config import config
+from core.model_router import TaskType, get_model_for_task
+from core.openrouter_client import openrouter
+from core.task_manager import task_manager
+from db.models import TaskStatus
+from tg.notifications import notify
 from agents.base_agent import BaseAgent
+from utils.cost_tracker import cost_tracker
+from utils.logging import setup_logging
 
-WEBDEV_SYSTEM_PROMPT = """\
-Sei un agente specializzato nella creazione di siti web. Puoi:
-- Creare siti HTML/CSS/JS, React, Next.js, Vue, ecc.
-- Generare codice completo e funzionante
-- Fare push su GitHub e deploy su Vercel
-- Iterare sul design basandoti sul feedback dell'utente
+log = setup_logging("webdev_agent")
 
-Workflow standard:
-1. Crea il codice del sito in una workspace dedicata
-2. Crea un repository GitHub
-3. Pusha il codice sul repository
-4. Fai deploy su Vercel collegando il repo
-5. Restituisci l'URL del sito deployato
+# ── System prompts per ruolo ───────────────────────────────────────────────────
 
-Usa i tool disponibili per ogni step. Assicurati che il codice sia completo e funzionante.
-Rispondi sempre in italiano."""
+_PLANNER_PROMPT = """\
+Sei un Web Architect. Il tuo unico compito è produrre un piano di sviluppo DETTAGLIATO in formato JSON.
+
+Analizza la richiesta dell'utente e restituisci SOLO un oggetto JSON valido con questa struttura:
+{
+  "project_name": "nome-repo-kebab-case",
+  "tech_stack": "es. Next.js + Tailwind CSS",
+  "description": "descrizione breve del progetto",
+  "files": [
+    {"path": "percorso/relativo/file.ext", "description": "cosa contiene e perché"}
+  ],
+  "deploy_target": "vercel",
+  "notes": "eventuali note tecniche importanti"
+}
+
+Non scrivere nulla fuori dal JSON. Sii preciso sui file da creare."""
+
+_BUILDER_PROMPT = """\
+Sei un Senior Full-Stack Developer. Riceverai un piano architetturale e devi implementarlo completamente.
+
+Regole:
+- Genera codice completo e funzionante, non placeholder né TODO
+- Per ogni file usa il tool filesystem con action=write sul path indicato nel piano
+- Crea prima la struttura di directory, poi i file
+- Il codice deve essere production-ready
+- Rispondi in italiano quando parli all'utente
+
+Workflow:
+1. Crea la workspace directory
+2. Scrivi ogni file indicato nel piano
+3. Conferma quando hai finito"""
+
+_REVIEWER_PROMPT = """\
+Sei un Senior Code Reviewer. Riceverai il codice generato da un developer e devi:
+
+1. Leggere i file chiave del progetto con il tool filesystem action=read
+2. Identificare problemi concreti: bug, sicurezza, performance, accessibilità, missing files
+3. Applicare i fix direttamente modificando i file con action=write
+4. Restituire un report finale con i fix applicati
+
+Concentrati su problemi reali, non su preferenze stilistiche.
+Rispondi in italiano."""
+
+_DEPLOYER_PROMPT = """\
+Sei un DevOps Engineer. Il tuo compito è pubblicare il progetto:
+
+1. Crea un repository GitHub (privato di default)
+2. Pusha tutti i file della workspace sul repo
+3. Crea il deploy su Vercel collegando il repo GitHub
+4. Restituisci l'URL pubblico del sito
+
+Usa i tool github e vercel disponibili. Rispondi in italiano."""
 
 
 class WebDevAgent(BaseAgent):
     name = "webdev"
-    description = "Creates websites, pushes to GitHub, deploys on Vercel."
+    description = "Creates websites via planner→builder→reviewer pipeline, then deploys on Vercel."
     default_task_type = TaskType.WEB_DEV
 
-    async def run(self, user_message, task_id, history=None, system_prompt="", model_override=None):
-        combined_prompt = f"{WEBDEV_SYSTEM_PROMPT}\n\n{system_prompt}" if system_prompt else WEBDEV_SYSTEM_PROMPT
-        return await super().run(
-            user_message=user_message,
+    # ── Pipeline helpers ───────────────────────────────────────────────────────
+
+    async def _llm_call(
+        self,
+        system_prompt: str,
+        user_content: str,
+        task_id: int,
+        task_type: TaskType = TaskType.CODE_GENERATION,
+        temperature: float = 0.3,
+        max_tokens: int = 4096,
+    ) -> str:
+        """Single non-tool LLM call for planner/reviewer steps."""
+        model = get_model_for_task(task_type)
+        response = await openrouter.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
             task_id=task_id,
-            history=history,
-            system_prompt=combined_prompt,
-            model_override=model_override,
+        )
+        return response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+
+    async def _run_phase(
+        self,
+        phase_name: str,
+        system_prompt: str,
+        user_content: str,
+        task_id: int,
+        task_type: TaskType = TaskType.CODE_GENERATION,
+        progress: int = 0,
+    ) -> str:
+        """Run a tool-using phase (builder / deployer) with full BaseAgent loop."""
+        await notify(f"🔧 <b>WebDev</b> — fase <b>{phase_name}</b> avviata")
+        await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=progress)
+        return await super().run(
+            user_message=user_content,
+            task_id=task_id,
+            system_prompt=system_prompt,
+            model_override=get_model_for_task(task_type),
+        )
+
+    # ── Main entry point ───────────────────────────────────────────────────────
+
+    async def run(
+        self,
+        user_message: str,
+        task_id: int,
+        history: list[dict] | None = None,
+        system_prompt: str = "",
+        model_override: str | None = None,
+    ) -> str:
+
+        # ── FASE 1: PLANNER ──────────────────────────────────────────────────
+        await notify("🗺️ <b>WebDev</b> — <b>FASE 1/4</b>: Pianificazione architettura…")
+        await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=5)
+
+        plan_raw = await self._llm_call(
+            system_prompt=_PLANNER_PROMPT,
+            user_content=user_message,
+            task_id=task_id,
+            task_type=TaskType.COMPLEX_REASONING,
+            temperature=0.2,
+            max_tokens=2048,
+        )
+
+        # Estrai JSON dal piano (il modello a volte aggiunge backtick)
+        try:
+            json_start = plan_raw.find("{")
+            json_end = plan_raw.rfind("}") + 1
+            plan: dict = json.loads(plan_raw[json_start:json_end])
+        except (json.JSONDecodeError, ValueError):
+            log.warning(f"[webdev] Planner non ha restituito JSON valido, uso raw text: {plan_raw[:200]}")
+            plan = {"project_name": "progetto-web", "tech_stack": "HTML/CSS/JS", "files": []}
+
+        project_name = plan.get("project_name", "progetto-web")
+        tech_stack = plan.get("tech_stack", "")
+        workdir = f"/srv/agent/workspaces/{project_name}"
+
+        await notify(
+            f"✅ <b>Piano pronto</b>\n"
+            f"📦 Progetto: <code>{project_name}</code>\n"
+            f"🛠️ Stack: {tech_stack}\n"
+            f"📄 File pianificati: {len(plan.get('files', []))}"
+        )
+
+        # ── FASE 2: BUILDER ──────────────────────────────────────────────────
+        await notify("👨‍💻 <b>WebDev</b> — <b>FASE 2/4</b>: Sviluppo codice…")
+        await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=20)
+
+        builder_context = (
+            f"Richiesta originale: {user_message}\n\n"
+            f"Piano architetturale:\n{json.dumps(plan, indent=2, ensure_ascii=False)}\n\n"
+            f"Directory di lavoro: {workdir}\n\n"
+            f"Crea tutti i file indicati nel piano. Inizia dalla directory root del progetto."
+        )
+
+        build_result = await self._run_phase(
+            phase_name="Build",
+            system_prompt=_BUILDER_PROMPT,
+            user_content=builder_context,
+            task_id=task_id,
+            task_type=TaskType.CODE_GENERATION,
+            progress=20,
+        )
+
+        # ── FASE 3: REVIEWER ────────────────────────────────────────────────
+        await notify("🔍 <b>WebDev</b> — <b>FASE 3/4</b>: Code review e fix…")
+        await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=60)
+
+        reviewer_context = (
+            f"Progetto: {project_name} ({tech_stack})\n"
+            f"Directory: {workdir}\n"
+            f"File attesi: {json.dumps([f['path'] for f in plan.get('files', [])], ensure_ascii=False)}\n\n"
+            f"Esegui la review, applica i fix necessari e restituisci un report."
+        )
+
+        review_result = await self._run_phase(
+            phase_name="Review",
+            system_prompt=_REVIEWER_PROMPT,
+            user_content=reviewer_context,
+            task_id=task_id,
+            task_type=TaskType.CODE_REVIEW,
+            progress=60,
+        )
+
+        # ── FASE 4: DEPLOYER ────────────────────────────────────────────────
+        await notify("🚀 <b>WebDev</b> — <b>FASE 4/4</b>: Deploy su GitHub + Vercel…")
+        await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=80)
+
+        deployer_context = (
+            f"Progetto: {project_name}\n"
+            f"Descrizione: {plan.get('description', '')}\n"
+            f"Directory locale: {workdir}\n"
+            f"File da pushare: {json.dumps([f['path'] for f in plan.get('files', [])], ensure_ascii=False)}\n\n"
+            f"Crea il repo GitHub '{project_name}', pusha i file e fai il deploy su Vercel."
+        )
+
+        deploy_result = await self._run_phase(
+            phase_name="Deploy",
+            system_prompt=_DEPLOYER_PROMPT,
+            user_content=deployer_context,
+            task_id=task_id,
+            task_type=TaskType.TOOL_EXECUTION,
+            progress=80,
+        )
+
+        await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=100)
+
+        # ── REPORT FINALE ────────────────────────────────────────────────────
+        task_cost = cost_tracker.get_task_cost(task_id)
+        return (
+            f"✅ <b>Progetto completato: {project_name}</b>\n\n"
+            f"🛠️ Stack: {tech_stack}\n\n"
+            f"<b>Review:</b>\n{review_result[:800]}\n\n"
+            f"<b>Deploy:</b>\n{deploy_result[:800]}\n\n"
+            f"💰 Costo totale task: ${task_cost:.3f}"
         )

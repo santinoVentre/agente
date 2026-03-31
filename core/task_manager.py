@@ -178,6 +178,44 @@ class TaskManager:
     def unregister_running_task(self, task_id: int):
         self._running_tasks.pop(task_id, None)
 
+    async def cleanup_stale_tasks(self) -> int:
+        """
+        Called at startup: mark all IN_PROGRESS / PENDING / WAITING_APPROVAL
+        tasks as CANCELLED. These are orphans from a previous agent run.
+        Returns the number of tasks cleaned up.
+        """
+        stale_statuses = [TaskStatus.PENDING, TaskStatus.IN_PROGRESS, TaskStatus.WAITING_APPROVAL]
+        async with async_session() as session:
+            result = await session.execute(
+                select(Task).where(Task.status.in_(stale_statuses))
+            )
+            stale = list(result.scalars().all())
+            for task in stale:
+                task.status = TaskStatus.CANCELLED
+                task.completed_at = datetime.now(timezone.utc)
+                task.error = "Annullato automaticamente al riavvio dell'agente"
+            await session.commit()
+
+        # Also cancel any asyncio tasks still tracked (shouldn't be any at startup)
+        for atask in list(self._running_tasks.values()):
+            if not atask.done():
+                atask.cancel()
+        self._running_tasks.clear()
+
+        if stale:
+            log.info(f"Startup cleanup: {len(stale)} task orfani cancellati: {[t.id for t in stale]}")
+        return len(stale)
+
+    async def cancel_all_active(self) -> int:
+        """Cancel all currently active tasks (manual operator command)."""
+        tasks = await self.get_active_tasks()
+        for t in tasks:
+            atask = self._running_tasks.pop(t.id, None)
+            if atask and not atask.done():
+                atask.cancel()
+            await self.update_task_status(t.id, TaskStatus.CANCELLED)
+        return len(tasks)
+
     async def close(self):
         if self._redis:
             await self._redis.close()

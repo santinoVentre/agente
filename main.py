@@ -110,6 +110,11 @@ async def startup():
     await init_db()
     log.info("Database initialized")
 
+    # 2b. Clean up stale tasks from previous run
+    cleaned = await task_manager.cleanup_stale_tasks()
+    if cleaned:
+        log.info(f"Cleaned up {cleaned} stale tasks from previous run")
+
     # 3. Load DB-registered tools
     await tool_registry.load_all()
     log.info(f"Tool registry loaded ({tool_registry.count()} tools)")

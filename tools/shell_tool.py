@@ -22,6 +22,7 @@ _DANGEROUS_PATTERNS = [
     "iptables -F", "ufw disable",
     "passwd", "useradd", "userdel", "usermod",
     ":(){:|:&};:",  # fork bomb
+    "cat .env", "cat /.env", "less .env", "more .env",  # block reading secrets files
 ]
 
 

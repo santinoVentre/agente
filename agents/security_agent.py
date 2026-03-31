@@ -44,6 +44,7 @@ _ALWAYS_PROTECTED_PATTERNS = [
     "/etc/passwd", "/etc/shadow", "/etc/sudoers",
     "/root/", "/boot/",
     "id_rsa", "id_ed25519",
+    ".env",          # Never expose environment secrets
 ]
 
 
@@ -109,6 +110,8 @@ class SecurityAgent:
         if any(path.endswith(p) or p in path for p in config.protected_paths):
             if action in ("write", "delete", "move"):
                 return RiskLevel.HIGH, "Modification of protected agent file"
+            if action == "read":
+                return RiskLevel.CRITICAL, "Read access to protected file is denied"
 
         return RiskLevel.LOW, None
 

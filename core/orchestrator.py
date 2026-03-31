@@ -213,12 +213,22 @@ class Orchestrator:
     # ── Status queries ───────────────────────────────────────────────
 
     async def _is_status_query(self, message: str) -> bool:
-        keywords = [
-            "a che punto", "stato", "status", "come va", "cosa stai facendo",
-            "task attivi", "progresso", "finito", "completato",
+        # Exact multi-word phrases that unambiguously request a status update
+        exact_phrases = [
+            "a che punto", "cosa stai facendo", "cosa stai facend",
+            "task attivi", "task in corso", "quanti task",
+            "sei occupato", "sei libero", "stai lavorando",
+            "qual è lo stato", "qual e' lo stato", "che stato ha",
+            "dimmi lo stato", "mostrami i task", "lista task",
         ]
-        msg_lower = message.lower()
-        return any(kw in msg_lower for kw in keywords)
+        # Single words only when they appear alone or as the whole message
+        standalone_words = ["status", "/tasks"]
+        msg_lower = message.lower().strip()
+        if any(phrase in msg_lower for phrase in exact_phrases):
+            return True
+        if msg_lower in standalone_words:
+            return True
+        return False
 
     async def _handle_status_query(self, message: str, user_id: int) -> str:
         tasks = await task_manager.get_active_tasks()
@@ -364,7 +374,7 @@ class Orchestrator:
             "  Se un approccio non funziona dopo 2-3 tentativi, cambia strategia invece di riprovare.",
             "- Se devi installare pacchetti Python, usa SEMPRE /srv/agent/app/.venv/bin/pip, non pip globale.",
             "- Job schedulati attivi: monitoring (5min), backup (24h), security_audit (6h).",
-            "- Comandi Telegram: /start, /status, /tasks, /costs, /budget, /tools, /cancel, /force_cancel, /logs, /log, /jobs, /job_enable, /job_disable, /help",
+            "- Comandi Telegram: /start, /status, /tasks, /costs, /budget, /tools, /cancel, /cancel_all, /force_cancel, /logs, /log, /jobs, /job_enable, /job_disable, /help",
 
             f"\nStai operando come agente: {agent_name}",
         ]

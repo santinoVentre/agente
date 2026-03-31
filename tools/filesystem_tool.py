@@ -26,6 +26,10 @@ def _is_safe_path(path: str, action: str = "read") -> bool:
     """
     resolved = Path(path).resolve()
 
+    # Never expose secrets files under any circumstance
+    if resolved.name == ".env" or resolved.suffix == ".env":
+        return False
+
     # Always writable roots
     writable_roots = [
         config.workspaces_dir.resolve(),
