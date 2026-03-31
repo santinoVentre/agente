@@ -69,12 +69,13 @@ def _build_agents() -> dict[str, object]:
     system_agent.register_tool(monitoring)
     system_agent.register_tool(project_registry)
 
-    # WebDev agent — filesystem + github + vercel + shell + telegram
+    # WebDev agent — filesystem + github + vercel + shell + browser + telegram
     webdev_agent = WebDevAgent()
     webdev_agent.register_tool(filesystem)
     webdev_agent.register_tool(github)
     webdev_agent.register_tool(vercel)
     webdev_agent.register_tool(shell)
+    webdev_agent.register_tool(browser)
     webdev_agent.register_tool(telegram)
     webdev_agent.register_tool(project_registry)
 

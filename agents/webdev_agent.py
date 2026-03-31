@@ -43,20 +43,29 @@ Regole:
 - Per ogni file usa il tool filesystem con action=write sul path indicato nel piano
 - Crea prima la struttura di directory, poi i file
 - Il codice deve essere production-ready
+- Le dipendenze devono essere aggiornate: evita versioni vecchie o deprecated
+- Prima di fissare versioni, verifica le versioni correnti via internet/shell
+- Se una major e' nuovissima e rischiosa, scegli una minor/patch stabile molto recente
 - Rispondi in italiano quando parli all'utente
 
 Workflow:
 1. Crea la workspace directory
-2. Scrivi ogni file indicato nel piano
-3. Conferma quando hai finito"""
+2. Verifica versioni librerie/framework in tempo reale:
+    - npm: `npm view <package> version`
+    - python: `pip index versions <package>` (oppure PyPI via browser)
+    - docker images: controlla tag stabili recenti
+3. Scrivi ogni file indicato nel piano con versioni aggiornate
+4. Conferma quando hai finito, includendo le versioni scelte"""
 
 _REVIEWER_PROMPT = """\
 Sei un Senior Code Reviewer. Riceverai il codice generato da un developer e devi:
 
 1. Leggere i file chiave del progetto con il tool filesystem action=read
 2. Identificare problemi concreti: bug, sicurezza, performance, accessibilità, missing files
-3. Applicare i fix direttamente modificando i file con action=write
-4. Restituire un report finale con i fix applicati
+3. Verificare che le versioni delle dipendenze non siano obsolete
+4. Se trovi versioni vecchie, aggiornale a versioni stabili recenti (con compatibilità ragionevole)
+5. Applicare i fix direttamente modificando i file con action=write
+6. Restituire un report finale con i fix applicati
 
 Concentrati su problemi reali, non su preferenze stilistiche.
 Rispondi in italiano."""
@@ -76,6 +85,11 @@ class WebDevAgent(BaseAgent):
     name = "webdev"
     description = "Creates websites via planner→builder→reviewer pipeline, then deploys on Vercel."
     default_task_type = TaskType.WEB_DEV
+    max_iterations = None
+    ask_approval_on_iteration_limit = False
+    max_same_tool_calls = 6
+    loop_approval_threshold = 10
+    ask_approval_on_loop = True
 
     # ── Pipeline helpers ───────────────────────────────────────────────────────
 
@@ -173,6 +187,9 @@ class WebDevAgent(BaseAgent):
             f"Richiesta originale: {user_message}\n\n"
             f"Piano architetturale:\n{json.dumps(plan, indent=2, ensure_ascii=False)}\n\n"
             f"Directory di lavoro: {workdir}\n\n"
+            f"Data corrente: 2026-03-31\n"
+            f"Prima di scrivere package.json/requirements, controlla versioni correnti online "
+            f"(npm view, pip index, browser) e usa dipendenze aggiornate o quasi.\n\n"
             f"Crea tutti i file indicati nel piano. Inizia dalla directory root del progetto."
         )
 
@@ -193,7 +210,8 @@ class WebDevAgent(BaseAgent):
             f"Progetto: {project_name} ({tech_stack})\n"
             f"Directory: {workdir}\n"
             f"File attesi: {json.dumps([f['path'] for f in plan.get('files', [])], ensure_ascii=False)}\n\n"
-            f"Esegui la review, applica i fix necessari e restituisci un report."
+            f"Controlla esplicitamente package.json, lockfile e requirements.* contro versioni correnti. "
+            f"Aggiorna dipendenze obsolete a release stabili recenti e poi restituisci un report."
         )
 
         review_result = await self._run_phase(
