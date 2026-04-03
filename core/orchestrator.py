@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,7 +15,9 @@ from core.inventory import get_latest_snapshot_summary
 from core.model_router import CLASSIFICATION_PROMPT, TaskType, get_model_for_task
 from core.openrouter_client import openrouter
 from core.project_registry import project_registry
+from core.reflection import reflection_engine
 from core.task_manager import task_manager
+from core.webdev_planner import PLANNING_QUESTIONS, get_session, start_session
 from db.models import TaskStatus
 from tg.notifications import notify, notify_done, notify_error
 from utils.cost_tracker import cost_tracker
@@ -114,6 +117,22 @@ class Orchestrator:
         if self._is_tool_creation_request(message, task_type):
             task_type = TaskType.CODE_GENERATION
 
+        # ── WebDev planning: start Q&A session instead of direct execution ──
+        if task_type == TaskType.WEB_DEV and get_session(user_id) is None:
+            session = start_session(user_id, message)
+            q = session.current_question
+            total = len(PLANNING_QUESTIONS)
+            return (
+                f"🌐 <b>Perfetto! Creiamo il tuo sito.</b>\n\n"
+                f"Prima ho bisogno di capire meglio il progetto. "
+                f"Ti farò <b>{total} domande rapide</b> e poi partirò subito.\n\n"
+                f"Puoi anche mandare un file JSON/TXT con le specifiche "
+                f"e salteremo le domande.\n\n"
+                f"{session.progress_bar()}\n\n"
+                f"{q['question']}"
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
         # Pick agent and model
         agent_name = self._pick_agent(task_type)
         model = get_model_for_task(task_type)
@@ -138,7 +157,11 @@ class Orchestrator:
         memories = await memory.recall_all(user_id)
         memory_context = memory.format_memories_for_prompt(memories)
 
+        # Inject improvement guidelines for this task type
+        improvement_ctx = await reflection_engine.get_improvement_context(user_id, task_type.value)
         system_prompt = await self._build_system_prompt(agent_name, memory_context, attachments)
+        if improvement_ctx:
+            system_prompt = system_prompt + improvement_ctx
 
         # For quick tasks, run synchronously; for complex ones, run in background
         if task_type in (TaskType.SIMPLE_CHAT, TaskType.ROUTING, TaskType.SUMMARIZATION):
@@ -148,6 +171,7 @@ class Orchestrator:
 
     async def _run_sync(self, agent, message, task, history, system_prompt, model) -> str:
         """Run agent synchronously — return response directly."""
+        t0 = time.monotonic()
         try:
             response = await agent.run(
                 user_message=message,
@@ -156,6 +180,7 @@ class Orchestrator:
                 system_prompt=system_prompt,
                 model_override=model,
             )
+            duration = time.monotonic() - t0
             await task_manager.complete_task(task.id, cost=cost_tracker.total_cost)
             await memory.save_message(task.user_id, "assistant", response, model=model)
             await memory.remember(
@@ -167,16 +192,39 @@ class Orchestrator:
                 ),
                 category="task_history",
             )
+            # Self-improvement: analyze completed task
+            asyncio.create_task(reflection_engine.analyze_task(
+                user_id=task.user_id,
+                task_id=task.id,
+                task_type=task.task_type,
+                user_message=message,
+                outcome=response,
+                success=True,
+                cost=cost_tracker.get_task_cost(task.id),
+                duration_seconds=duration,
+            ))
             return response
         except Exception as e:
+            duration = time.monotonic() - t0
             log.error(f"Task #{task.id} failed: {e}", exc_info=True)
             await task_manager.fail_task(task.id, str(e))
+            asyncio.create_task(reflection_engine.analyze_task(
+                user_id=task.user_id,
+                task_id=task.id,
+                task_type=task.task_type,
+                user_message=message,
+                outcome=str(e),
+                success=False,
+                cost=cost_tracker.get_task_cost(task.id),
+                duration_seconds=duration,
+            ))
             return f"❌ Errore: {str(e)[:500]}"
 
     async def _run_async(self, agent, message, task, history, system_prompt, model) -> str:
         """Launch agent in background — return acknowledgement immediately."""
 
         async def _background():
+            t0 = time.monotonic()
             try:
                 response = await agent.run(
                     user_message=message,
@@ -185,6 +233,7 @@ class Orchestrator:
                     system_prompt=system_prompt,
                     model_override=model,
                 )
+                duration = time.monotonic() - t0
                 await task_manager.complete_task(task.id, cost=cost_tracker.total_cost)
                 await memory.save_message(task.user_id, "assistant", response, model=model)
                 await memory.remember(
@@ -196,10 +245,32 @@ class Orchestrator:
                     ),
                     category="task_history",
                 )
+                # Self-improvement: analyze completed task
+                asyncio.create_task(reflection_engine.analyze_task(
+                    user_id=task.user_id,
+                    task_id=task.id,
+                    task_type=task.task_type,
+                    user_message=message,
+                    outcome=response,
+                    success=True,
+                    cost=cost_tracker.get_task_cost(task.id),
+                    duration_seconds=duration,
+                ))
                 await notify_done(message[:60], response)
             except Exception as e:
+                duration = time.monotonic() - t0
                 log.error(f"Task #{task.id} failed: {e}", exc_info=True)
                 await task_manager.fail_task(task.id, str(e))
+                asyncio.create_task(reflection_engine.analyze_task(
+                    user_id=task.user_id,
+                    task_id=task.id,
+                    task_type=task.task_type,
+                    user_message=message,
+                    outcome=str(e),
+                    success=False,
+                    cost=cost_tracker.get_task_cost(task.id),
+                    duration_seconds=duration,
+                ))
                 await notify_error(message[:60], str(e))
             finally:
                 task_manager.unregister_running_task(task.id)
@@ -209,6 +280,89 @@ class Orchestrator:
 
         # Keep Telegram quiet for operational startup messages.
         return ""
+
+    # ── WebDev task (called after Q&A planning completes) ────────────
+
+    async def handle_webdev_task(
+        self,
+        user_id: int,
+        initial_message: str,
+        specs: dict,
+        design_system: dict,
+        media_files: list[str],
+        chat_id: int,
+    ) -> None:
+        """Run the WebDev pipeline with pre-built specs and design system.
+
+        Called by tg/handlers.py after a planning session completes.
+        Always runs in background.
+        """
+        agent = self._agents.get("webdev")
+        if not agent:
+            await notify("❌ WebDev agent non disponibile.")
+            return
+
+        model = get_model_for_task(TaskType.WEB_DEV)
+        task = await task_manager.create_task(
+            user_id=user_id,
+            description=f"[webdev:planned] {initial_message[:480]}",
+            task_type=TaskType.WEB_DEV.value,
+            agent="webdev",
+            model=model,
+        )
+
+        memories = await memory.recall_all(user_id)
+        memory_context = memory.format_memories_for_prompt(memories)
+        improvement_ctx = await reflection_engine.get_improvement_context(user_id, TaskType.WEB_DEV.value)
+        system_prompt = await self._build_system_prompt("webdev", memory_context, media_files or None)
+        if improvement_ctx:
+            system_prompt = system_prompt + improvement_ctx
+
+        async def _bg():
+            t0 = time.monotonic()
+            try:
+                response = await agent.run(
+                    user_message=initial_message,
+                    task_id=task.id,
+                    specs=specs,
+                    design_system=design_system,
+                    system_prompt=system_prompt,
+                    model_override=model,
+                )
+                duration = time.monotonic() - t0
+                await task_manager.complete_task(task.id, cost=cost_tracker.total_cost)
+                await memory.save_message(user_id, "assistant", response, model=model)
+                asyncio.create_task(reflection_engine.analyze_task(
+                    user_id=user_id,
+                    task_id=task.id,
+                    task_type=TaskType.WEB_DEV.value,
+                    user_message=initial_message,
+                    outcome=response,
+                    success=True,
+                    cost=cost_tracker.get_task_cost(task.id),
+                    duration_seconds=duration,
+                ))
+                await notify_done(initial_message[:60], response)
+            except Exception as exc:
+                duration = time.monotonic() - t0
+                log.error(f"WebDev task #{task.id} failed: {exc}", exc_info=True)
+                await task_manager.fail_task(task.id, str(exc))
+                asyncio.create_task(reflection_engine.analyze_task(
+                    user_id=user_id,
+                    task_id=task.id,
+                    task_type=TaskType.WEB_DEV.value,
+                    user_message=initial_message,
+                    outcome=str(exc),
+                    success=False,
+                    cost=cost_tracker.get_task_cost(task.id),
+                    duration_seconds=duration,
+                ))
+                await notify_error(initial_message[:60], str(exc))
+            finally:
+                task_manager.unregister_running_task(task.id)
+
+        atask = asyncio.create_task(_bg())
+        task_manager.register_running_task(task.id, atask)
 
     # ── Status queries ───────────────────────────────────────────────
 

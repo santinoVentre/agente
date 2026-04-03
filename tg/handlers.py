@@ -25,7 +25,6 @@ _orchestrator: "Orchestrator | None" = None
 # Pending approval futures: task_id → asyncio.Future[bool]
 _pending_approvals: dict[int, asyncio.Future[bool]] = {}
 
-
 def set_orchestrator(orch: "Orchestrator"):
     global _orchestrator
     _orchestrator = orch
@@ -271,6 +270,25 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Inviami un messaggio di testo.")
         return
 
+    user_id = update.effective_user.id
+
+    # ── Planning session intercept ────────────────────────────────────────
+    from core.webdev_planner import get_session, abort_session
+    session = get_session(user_id)
+    if session and not session.completed:
+        # Special abort command
+        if text.strip().lower() in ("/annulla", "/abort", "annulla", "abort", "/cancel"):
+            abort_session(user_id)
+            await update.message.reply_text("❌ Pianificazione annullata.")
+            return
+
+        response = await _handle_planning_answer(session, text, update)
+        if response:
+            response = md_bold_to_html(response)
+            await _reply_html_safe(update.message, response)
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
     # Show typing indicator
     await update.message.chat.send_action("typing")
 
@@ -439,11 +457,57 @@ async def request_approval(task_id: int, timeout: float = 300.0) -> bool:
         return False
 
 
+# ── Planning session helpers ────────────────────────────────────────────────
+
+
+async def _handle_planning_answer(session, text: str, update: Update) -> str | None:
+    """Process a user answer in the context of an active planning session.
+
+    Returns the next question string, or None if finalization was triggered.
+    """
+    session.record_answer(text)
+
+    if session.current_question is None:
+        # All questions answered — finalize
+        await update.message.reply_text(
+            "⏳ <b>Perfetto!</b> Sto generando le specifiche e il design system…\n"
+            "(può richiedere 20-30 secondi)",
+            parse_mode="HTML",
+        )
+        from core.webdev_planner import end_session
+        try:
+            result = await session.finalize()
+            end_session(session.user_id)
+
+            # Show specs summary
+            specs_summary = session.format_specs_summary()
+            await update.message.reply_text(specs_summary, parse_mode="HTML")
+
+            # Trigger the full webdev pipeline with specs
+            if _orchestrator:
+                await _orchestrator.handle_webdev_task(
+                    user_id=session.user_id,
+                    initial_message=session.initial_message,
+                    specs=result["specs"],
+                    design_system=result["design_system"],
+                    media_files=result["media"],
+                    chat_id=update.effective_chat.id,
+                )
+        except Exception as exc:
+            log.error(f"Planning finalization error: {exc}", exc_info=True)
+            await update.message.reply_text(f"❌ Errore nella generazione delle specifiche: {exc}")
+        return None
+
+    # More questions to ask
+    q = session.current_question
+    return f"{session.progress_bar()}\n\n{q['question']}"
+
+
 # ── File/photo handlers ─────────────────────────────────────────────────
 
 
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming photos — pass to orchestrator with caption as instructions."""
+    """Handle incoming photos — route to planning session or orchestrator."""
     if not _is_authorized(update):
         return
     if _orchestrator is None:
@@ -456,9 +520,42 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     file_path.parent.mkdir(parents=True, exist_ok=True)
     await file.download_to_drive(str(file_path))
 
+    user_id = update.effective_user.id
+
+    # ── Planning session: inspiration image ──────────────────────────────
+    from core.webdev_planner import get_session
+    session = get_session(user_id)
+    if session and not session.completed and session.accepts_media_now():
+        await update.message.reply_text("🔍 Analizzo l'immagine…")
+        insight = await session.add_media_with_analysis(str(file_path))
+        caption = update.message.caption or ""
+        if caption:
+            session.answers.setdefault("inspiration", "")
+            session.answers["inspiration"] = (
+                session.answers["inspiration"] + "\n" + caption
+            ).strip()
+        insight_summary = ""
+        if insight:
+            try:
+                import json as _json
+                ins = _json.loads(insight[insight.find("{"):insight.rfind("}") + 1])
+                insight_summary = (
+                    f"\n✅ <b>Immagine analizzata:</b> {ins.get('style', '')} — "
+                    f"colori: {', '.join(ins.get('colors', [])[:3])}"
+                )
+            except Exception:
+                pass
+        await update.message.reply_text(
+            f"📸 Immagine salvata come riferimento.{insight_summary}\n\n"
+            "Puoi mandarne altre, oppure rispondi alla domanda per continuare.",
+            parse_mode="HTML",
+        )
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
     caption = update.message.caption or "Immagine ricevuta, cosa devo fare?"
     response = await _orchestrator.handle_user_message(
-        user_id=update.effective_user.id,
+        user_id=user_id,
         message=caption,
         chat_id=update.effective_chat.id,
         attachments=[str(file_path)],
@@ -468,7 +565,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming documents/files."""
+    """Handle incoming documents/files — route to planning session or orchestrator."""
     if not _is_authorized(update):
         return
     if _orchestrator is None:
@@ -481,9 +578,53 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     file_path.parent.mkdir(parents=True, exist_ok=True)
     await file.download_to_drive(str(file_path))
 
+    user_id = update.effective_user.id
+
+    # ── Planning session: specs file upload ──────────────────────────────
+    from core.webdev_planner import get_session, end_session
+    session = get_session(user_id)
+    if session and not session.completed:
+        fname = doc.file_name or ""
+        if fname.endswith((".json", ".txt", ".md")):
+            try:
+                content = Path(str(file_path)).read_text(encoding="utf-8", errors="replace")
+                await update.message.reply_text(
+                    f"📄 File specs ricevuto: <code>{fname}</code>\n"
+                    "Uso questo come specifiche di progetto, genero il design system…",
+                    parse_mode="HTML",
+                )
+                # Override the initial message with file content
+                session.initial_message = content[:3000]
+                # Skip remaining questions and finalize immediately
+                session.current_question_idx = len(session.answers)  # mark done
+                # Fill remaining answers as "vedi file specs"
+                from core.webdev_planner import PLANNING_QUESTIONS
+                for q in PLANNING_QUESTIONS:
+                    session.answers.setdefault(q["key"], "Vedi file specs allegato")
+
+                result = await session.finalize()
+                end_session(user_id)
+                specs_summary = session.format_specs_summary()
+                await update.message.reply_text(specs_summary, parse_mode="HTML")
+
+                if _orchestrator:
+                    await _orchestrator.handle_webdev_task(
+                        user_id=user_id,
+                        initial_message=session.initial_message,
+                        specs=result["specs"],
+                        design_system=result["design_system"],
+                        media_files=result["media"],
+                        chat_id=update.effective_chat.id,
+                    )
+                return
+            except Exception as exc:
+                await update.message.reply_text(f"❌ Errore lettura file: {exc}")
+                return
+    # ─────────────────────────────────────────────────────────────────────
+
     caption = update.message.caption or f"File ricevuto: {doc.file_name}. Cosa devo fare?"
     response = await _orchestrator.handle_user_message(
-        user_id=update.effective_user.id,
+        user_id=user_id,
         message=caption,
         chat_id=update.effective_chat.id,
         attachments=[str(file_path)],

@@ -8,6 +8,7 @@ from config import config
 from core.model_router import TaskType, get_model_for_task
 from core.openrouter_client import openrouter
 from core.task_manager import task_manager
+from core.webdev_planner import build_design_system_prompt_section
 from db.models import TaskStatus
 from tg.notifications import notify
 from agents.base_agent import BaseAgent
@@ -47,6 +48,10 @@ Regole:
 - Prima di fissare versioni, verifica le versioni correnti via internet/shell
 - Se una major e' nuovissima e rischiosa, scegli una minor/patch stabile molto recente
 - Rispondi in italiano quando parli all'utente
+- RISPETTA SCRUPOLOSAMENTE il design system fornito: colori, font, spacing, stile componenti
+- Il sito deve sembrare fatto da un'agenzia top (Awwwards-level), non un template generico
+- Implementa animazioni e micro-interazioni come indicato nel design system
+- Mobile-first responsive OBBLIGATORIO in ogni file CSS/JSX
 
 Workflow:
 1. Crea la workspace directory
@@ -55,7 +60,8 @@ Workflow:
     - python: `pip index versions <package>` (oppure PyPI via browser)
     - docker images: controlla tag stabili recenti
 3. Scrivi ogni file indicato nel piano con versioni aggiornate
-4. Conferma quando hai finito, includendo le versioni scelte"""
+4. Applica il design system a tutti i componenti visivi
+5. Conferma quando hai finito, includendo le versioni scelte"""
 
 _REVIEWER_PROMPT = """\
 Sei un Senior Code Reviewer. Riceverai il codice generato da un developer e devi:
@@ -92,6 +98,50 @@ class WebDevAgent(BaseAgent):
     ask_approval_on_loop = True
 
     # ── Pipeline helpers ───────────────────────────────────────────────────────
+
+    async def _specs_to_file_plan(self, specs: dict, task_id: int) -> dict:
+        """Convert Q&A specs into a detailed file plan via LLM."""
+        _FILE_PLAN_PROMPT = """\
+Sei un Web Architect. Dato un documento di specifiche di progetto, genera SOLO un JSON con la lista
+completa dei file da creare. Struttura:
+{
+  "project_name": "nome-kebab-case",
+  "tech_stack": "stack",
+  "description": "breve descrizione",
+  "deploy_target": "vercel",
+  "files": [
+    {"path": "src/app/page.tsx", "description": "Home page con tutte le sezioni"},
+    {"path": "src/components/Hero.tsx", "description": "Hero component full-screen"},
+    ...
+  ],
+  "notes": "note tecniche"
+}
+Includi TUTTI i file necessari: layout, pagine, componenti, stili, config, package.json, README.
+Non omettere nulla. Sii preciso."""
+
+        plan_raw = await self._llm_call(
+            system_prompt=_FILE_PLAN_PROMPT,
+            user_content=json.dumps(specs, indent=2, ensure_ascii=False),
+            task_id=task_id,
+            task_type=TaskType.COMPLEX_REASONING,
+            temperature=0.15,
+            max_tokens=2048,
+        )
+        try:
+            js = plan_raw[plan_raw.find("{"):plan_raw.rfind("}") + 1]
+            plan = json.loads(js)
+            # Merge specs data into plan
+            plan.setdefault("project_name", specs.get("project_name", "progetto-web"))
+            plan.setdefault("tech_stack", specs.get("tech_stack", "Next.js 15 + Tailwind CSS 4"))
+            return plan
+        except (json.JSONDecodeError, ValueError):
+            log.warning(f"[webdev] _specs_to_file_plan non JSON: {plan_raw[:200]}")
+            return {
+                "project_name": specs.get("project_name", "progetto-web"),
+                "tech_stack": specs.get("tech_stack", "Next.js 15 + Tailwind CSS 4"),
+                "description": specs.get("description", ""),
+                "files": [],
+            }
 
     async def _llm_call(
         self,
@@ -144,29 +194,35 @@ class WebDevAgent(BaseAgent):
         history: list[dict] | None = None,
         system_prompt: str = "",
         model_override: str | None = None,
+        specs: dict | None = None,
+        design_system: dict | None = None,
     ) -> str:
 
         # ── FASE 1: PLANNER ──────────────────────────────────────────────────
-        await notify("🗺️ <b>WebDev</b> — <b>FASE 1/4</b>: Pianificazione architettura…")
         await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=5)
 
-        plan_raw = await self._llm_call(
-            system_prompt=_PLANNER_PROMPT,
-            user_content=user_message,
-            task_id=task_id,
-            task_type=TaskType.COMPLEX_REASONING,
-            temperature=0.2,
-            max_tokens=2048,
-        )
-
-        # Estrai JSON dal piano (il modello a volte aggiunge backtick)
-        try:
-            json_start = plan_raw.find("{")
-            json_end = plan_raw.rfind("}") + 1
-            plan: dict = json.loads(plan_raw[json_start:json_end])
-        except (json.JSONDecodeError, ValueError):
-            log.warning(f"[webdev] Planner non ha restituito JSON valido, uso raw text: {plan_raw[:200]}")
-            plan = {"project_name": "progetto-web", "tech_stack": "HTML/CSS/JS", "files": []}
+        if specs:
+            # Specs already provided by the Q&A planner — skip LLM planner
+            await notify("🗺️ <b>WebDev</b> — <b>FASE 1/4</b>: Specifiche già pronte, generazione file list…")
+            plan = await self._specs_to_file_plan(specs, task_id)
+        else:
+            # No specs: fall back to LLM-based planning from raw message
+            await notify("🗺️ <b>WebDev</b> — <b>FASE 1/4</b>: Pianificazione architettura…")
+            plan_raw = await self._llm_call(
+                system_prompt=_PLANNER_PROMPT,
+                user_content=user_message,
+                task_id=task_id,
+                task_type=TaskType.COMPLEX_REASONING,
+                temperature=0.2,
+                max_tokens=2048,
+            )
+            try:
+                json_start = plan_raw.find("{")
+                json_end = plan_raw.rfind("}") + 1
+                plan: dict = json.loads(plan_raw[json_start:json_end])
+            except (json.JSONDecodeError, ValueError):
+                log.warning(f"[webdev] Planner non JSON: {plan_raw[:200]}")
+                plan = {"project_name": "progetto-web", "tech_stack": "Next.js 15 + Tailwind CSS 4", "files": []}
 
         project_name = plan.get("project_name", "progetto-web")
         tech_stack = plan.get("tech_stack", "")
@@ -183,14 +239,39 @@ class WebDevAgent(BaseAgent):
         await notify("👨‍💻 <b>WebDev</b> — <b>FASE 2/4</b>: Sviluppo codice…")
         await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=20)
 
+        # Inject design system if available
+        design_system_section = ""
+        if design_system:
+            design_system_section = build_design_system_prompt_section(design_system)
+        elif specs and specs.get("design_system"):
+            design_system_section = build_design_system_prompt_section(specs["design_system"])
+
+        # Build rich specs context if available
+        specs_context = ""
+        if specs:
+            specs_context = (
+                f"\n\n## Specifiche di progetto\n"
+                f"Business: {specs.get('business_name', '')}\n"
+                f"Scopo: {specs.get('purpose', '')}\n"
+                f"Target: {specs.get('target_audience', '')}\n"
+                f"Tone: {specs.get('tone_of_voice', '')}\n"
+                f"Lingua: {specs.get('copy_language', 'it')}\n"
+                f"SEO keywords: {', '.join(specs.get('seo_keywords', []))}\n"
+                f"Content: {json.dumps(specs.get('content_strategy', {}), ensure_ascii=False)}\n"
+                f"\nPagine dettagliate:\n"
+                + json.dumps(specs.get("pages", []), indent=2, ensure_ascii=False)
+            )
+
         builder_context = (
             f"Richiesta originale: {user_message}\n\n"
             f"Piano architetturale:\n{json.dumps(plan, indent=2, ensure_ascii=False)}\n\n"
             f"Directory di lavoro: {workdir}\n\n"
-            f"Data corrente: 2026-03-31\n"
+            f"Data corrente: 2026-04-03\n"
             f"Prima di scrivere package.json/requirements, controlla versioni correnti online "
-            f"(npm view, pip index, browser) e usa dipendenze aggiornate o quasi.\n\n"
-            f"Crea tutti i file indicati nel piano. Inizia dalla directory root del progetto."
+            f"(npm view, pip index, browser) e usa dipendenze aggiornate o quasi.\n"
+            f"{specs_context}"
+            f"{design_system_section}\n\n"
+            f"Crea tutti i file indicati nel piano rispettando ESATTAMENTE il design system."
         )
 
         build_result = await self._run_phase(
