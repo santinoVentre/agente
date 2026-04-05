@@ -75,6 +75,7 @@ class Orchestrator:
             TaskType.MEDIA: "media",
             TaskType.CODE_GENERATION: "system",
             TaskType.CODE_REVIEW: "system",
+            TaskType.CODE_FIX: "system",
             TaskType.COMPLEX_REASONING: "system",
         }
         agent_name = agent_map.get(task_type, "system")

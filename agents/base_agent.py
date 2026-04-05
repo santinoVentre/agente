@@ -8,7 +8,10 @@ from typing import Any
 
 from core.openrouter_client import openrouter
 from core.model_router import TaskType, get_model_for_task
+from core.execution_controller import execution_controller, MAX_STEPS, MAX_TOKENS_PER_TASK
+from core.context_compressor import compress_messages
 from core.task_manager import task_manager
+from config import config
 from db.models import ActionVerdict, RiskLevel, TaskStatus
 from agents.security_agent import security_agent
 from tg.notifications import notify, notify_approval_needed
@@ -165,6 +168,10 @@ class BaseAgent:
         _task_budget_approved = False   # True once user approves exceeding task budget
         _daily_budget_approved = False  # True once user approves exceeding daily budget
 
+        # ── Execution controller state for this run ──────────────────
+        exec_state = execution_controller.get(task_id)
+        _effective_max_steps = config.max_steps_per_task  # default 8, overridable
+
         iteration = 0
         while True:
             if self._iteration_limit_enabled() and iteration >= max_iterations:
@@ -203,11 +210,40 @@ class BaseAgent:
                 continue
 
             iteration += 1
+            exec_state.tick()
             now = loop.time()
             if now - last_heartbeat >= HEARTBEAT_SECONDS:
                 progress = min(90, 10 + iteration * 5)
                 await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=progress)
                 last_heartbeat = now
+
+            # ── Execution controller guards ─────────────────────────────
+
+            # Hard step limit (MAX_STEPS from config, default 8)
+            if not self.ask_approval_on_iteration_limit and exec_state.is_step_limit_reached():
+                log.warning(f"[{self.name}] Task #{task_id} reached MAX_STEPS ({_effective_max_steps})")
+                await notify(
+                    f"⚠️ Task #{task_id} (<b>{self.name}</b>): step limit reached ({exec_state.steps}). Stopping."
+                )
+                return (
+                    f"Stopped: reached the maximum step limit ({_effective_max_steps}). "
+                    "Task may be incomplete."
+                )
+
+            # Token budget guard
+            if exec_state.is_token_budget_exceeded():
+                log.warning(
+                    f"[{self.name}] Task #{task_id} token budget exceeded "
+                    f"({exec_state.total_tokens} / {MAX_TOKENS_PER_TASK})"
+                )
+                return (
+                    f"Stopped: token budget exceeded ({exec_state.total_tokens} tokens used, "
+                    f"limit {MAX_TOKENS_PER_TASK}). Task may be incomplete."
+                )
+
+            # Context compression every SUMMARY_INTERVAL steps — uses cheap model
+            if exec_state.should_compress():
+                messages = await compress_messages(messages, task_id=task_id)
 
             # Check per-task cost limit (ask user, don't auto-block)
             task_cost = cost_tracker.get_task_cost(task_id)
@@ -256,6 +292,13 @@ class BaseAgent:
                 temperature=0.3,
                 max_tokens=4096,
                 task_id=task_id,
+            )
+
+            # Track tokens consumed by this call against the task token budget
+            _usage = response.get("usage", {})
+            exec_state.record_tokens(
+                _usage.get("total_tokens", 0) or
+                _usage.get("prompt_tokens", 0) + _usage.get("completion_tokens", 0)
             )
 
             choice = response.get("choices", [{}])[0]
@@ -314,6 +357,15 @@ class BaseAgent:
 
                     if not result.get("success", True):
                         consecutive_tool_errors += 1
+                        # Model escalation: if repeated failures, escalate tier
+                        if consecutive_tool_errors >= 2:
+                            escalated = exec_state.escalate_model()
+                            if escalated and model != escalated:
+                                log.info(
+                                    f"[{self.name}] Task #{task_id}: escalating model "
+                                    f"{model} → {escalated} after {consecutive_tool_errors} errors"
+                                )
+                                model = escalated
                     else:
                         consecutive_tool_errors = 0
 

@@ -55,12 +55,21 @@ class Config:
     redis_url: str = field(default_factory=lambda: _env("REDIS_URL", "redis://localhost:6379/0"))
 
     # --- Model routing ---
+    # CHEAP  — execution, parsing, tool calls, repetitive tasks
     model_cheap: str = field(default_factory=lambda: _env("MODEL_ROUTING_CHEAP", "google/gemini-2.0-flash-001"))
-    model_mid: str = field(default_factory=lambda: _env("MODEL_ROUTING_MID", "qwen/qwen3-235b-a22b"))
-    model_expensive: str = field(default_factory=lambda: _env("MODEL_ROUTING_EXPENSIVE", "anthropic/claude-sonnet-4-20250514"))
-    model_autonomous: str = field(default_factory=lambda: _env("MODEL_AUTONOMOUS", "qwen/qwen3-235b-a22b"))
-    model_code_generation: str = field(default_factory=lambda: _env("MODEL_CODE_GENERATION", "moonshotai/kimi-k2"))
+    # MID    — reasoning, planning, validation, code generation (PRIMARY for websites)
+    model_mid: str = field(default_factory=lambda: _env("MODEL_ROUTING_MID", "anthropic/claude-sonnet-4-5"))
+    # EXPENSIVE — last resort: task fails multiple times / extreme complexity
+    model_expensive: str = field(default_factory=lambda: _env("MODEL_ROUTING_EXPENSIVE", "anthropic/claude-opus-4-5"))
+    # Legacy / specialised overrides (env-configurable)
+    model_autonomous: str = field(default_factory=lambda: _env("MODEL_AUTONOMOUS", "anthropic/claude-sonnet-4-5"))
+    model_code_generation: str = field(default_factory=lambda: _env("MODEL_CODE_GENERATION", "anthropic/claude-sonnet-4-5"))
     model_tool_execution: str = field(default_factory=lambda: _env("MODEL_TOOL_EXECUTION", "google/gemini-2.0-flash-001"))
+
+    # --- Execution controller ---
+    max_steps_per_task: int = field(default_factory=lambda: _env_int("MAX_STEPS_PER_TASK", 8))
+    max_tokens_per_task: int = field(default_factory=lambda: _env_int("MAX_TOKENS_PER_TASK", 15_000))
+    context_summary_interval: int = field(default_factory=lambda: _env_int("CONTEXT_SUMMARY_INTERVAL", 3))
 
     # --- Security ---
     max_shell_timeout: int = field(default_factory=lambda: _env_int("MAX_SHELL_TIMEOUT", 300))
