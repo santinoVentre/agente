@@ -153,16 +153,16 @@ class Orchestrator:
 
         await task_manager.update_task_status(task.id, TaskStatus.IN_PROGRESS, progress=5)
 
-        # Build context
-        history = await memory.get_conversation_history(user_id, limit=10)
-        memories = await memory.recall_all(user_id)
+        # Build context — keep history short to save tokens
+        history = await memory.get_conversation_history(user_id, limit=4)
+        memories = await memory.recall_recent(user_id, limit=5, value_max_chars=200)
         memory_context = memory.format_memories_for_prompt(memories)
 
         # Inject improvement guidelines for this task type
         improvement_ctx = await reflection_engine.get_improvement_context(user_id, task_type.value)
-        system_prompt = await self._build_system_prompt(agent_name, memory_context, attachments)
+        system_prompt = await self._build_system_prompt(agent_name, memory_context, attachments, task_type)
         if improvement_ctx:
-            system_prompt = system_prompt + improvement_ctx
+            system_prompt = system_prompt + improvement_ctx[:800]
 
         # For quick tasks, run synchronously; for complex ones, run in background
         if task_type in (TaskType.SIMPLE_CHAT, TaskType.ROUTING, TaskType.SUMMARIZATION):
@@ -312,12 +312,12 @@ class Orchestrator:
             model=model,
         )
 
-        memories = await memory.recall_all(user_id)
+        memories = await memory.recall_recent(user_id, limit=5, value_max_chars=200)
         memory_context = memory.format_memories_for_prompt(memories)
         improvement_ctx = await reflection_engine.get_improvement_context(user_id, TaskType.WEB_DEV.value)
-        system_prompt = await self._build_system_prompt("webdev", memory_context, media_files or None)
+        system_prompt = await self._build_system_prompt("webdev", memory_context, media_files or None, TaskType.WEB_DEV)
         if improvement_ctx:
-            system_prompt = system_prompt + improvement_ctx
+            system_prompt = system_prompt + improvement_ctx[:800]
 
         async def _bg():
             t0 = time.monotonic()
@@ -413,130 +413,84 @@ class Orchestrator:
     # ── System prompt ────────────────────────────────────────────────
 
     async def _build_system_prompt(
-        self, agent_name: str, memory_context: str, attachments: list[str] | None
+        self,
+        agent_name: str,
+        memory_context: str,
+        attachments: list[str] | None,
+        task_type: TaskType = TaskType.SIMPLE_CHAT,
     ) -> str:
-        try:
-            infra_summary = await get_latest_snapshot_summary()
-        except Exception as e:
-            log.warning(f"Failed to load infrastructure snapshot summary: {e}")
-            infra_summary = "Snapshot infrastrutturale non disponibile"
+        # ── Tier classification ──────────────────────────────
+        _needs_infra = task_type in (
+            TaskType.SYSTEM, TaskType.CODE_GENERATION, TaskType.CODE_REVIEW,
+            TaskType.CODE_FIX, TaskType.COMPLEX_REASONING,
+        )
+        _needs_projects = task_type in (TaskType.WEB_DEV, TaskType.CODE_GENERATION)
+        _needs_tools_detail = task_type not in (TaskType.SIMPLE_CHAT, TaskType.ROUTING, TaskType.SUMMARIZATION)
+        _needs_self_improve = task_type in (
+            TaskType.CODE_GENERATION, TaskType.CODE_REVIEW, TaskType.CODE_FIX, TaskType.SYSTEM,
+        )
 
-        try:
-            projects_summary = await project_registry.get_recent_projects_summary(limit=6)
-        except Exception as e:
-            log.warning(f"Failed to load projects summary: {e}")
-            projects_summary = "Registro progetti non disponibile"
-
+        # ── Core identity (always included) ────────────────────
         parts = [
-            # ── Identità ──
-            "Sei l'agente personale di Santino. Sei un sistema autonomo che vive su un "
-            "server VPS Linux (Ubuntu 24.04, 4 vCPU, 4GB RAM, 120GB NVMe, IP 87.106.245.253, IONOS).",
-            "Stai comunicando con Santino ESCLUSIVAMENTE tramite le API di Telegram. "
-            "La conversazione avviene dentro il bot Telegram: tu ricevi i messaggi e rispondi tramite l'API.",
-
-            # ── Infrastruttura ──
-            "\n== INFRASTRUTTURA ==",
-            "- Il tuo codice sorgente si trova in: /srv/agent/app/",
-            "- Puoi LEGGERE tutto il tuo codice sorgente con il tool filesystem (read, list) o con shell (cat, ls).",
-            "- I tuoi file CORE protetti da modifica diretta (richiedono approvazione) sono: "
-            "orchestrator.py, security_agent.py, tool_validator.py, config.py, db/models.py",
-            "- Puoi SCRIVERE liberamente in: workspaces, media, tools/custom, logs, /tmp",
-            "- La tua configurazione (.env) è in: /srv/agent/app/.env — contiene token e segreti.",
-            "- Database PostgreSQL 16 su localhost:5432 (Docker container 'agent-postgres')",
-            "- Redis 7 su localhost:6379 (Docker container 'agent-redis')",
-            "- Sei eseguito come utente 'agent' via systemd (servizio: agent.service)",
-            "- SUDO LIMITATO: hai accesso sudo SENZA password per comandi specifici:",
-            "  • sudo apt update / sudo apt install -y <pacchetto>",
-            "  • sudo systemctl <start|stop|restart|reload|status> <servizio>",
-            "  • sudo cp /tmp/agent-* <destinazione> (per copiare config da /tmp a /etc/)",
-            "  • sudo ln -sf <sorgente> <link> (per link simbolici, es. nginx sites-enabled)",
-            "  • sudo rm /etc/nginx/sites-enabled/<file> (per disabilitare siti nginx)",
-            "  • sudo certbot (per certificati SSL Let's Encrypt)",
-            "  • sudo ufw <allow|deny|status|enable> (per gestire firewall)",
-            "  • sudo nginx -t (per testare config nginx)",
-            "  WORKFLOW PER NGINX: 1) scrivi config in /tmp/agent-<nome>.conf, "
-            "  2) sudo cp /tmp/agent-<nome>.conf /etc/nginx/sites-available/<nome>, "
-            "  3) sudo ln -sf /etc/nginx/sites-available/<nome> /etc/nginx/sites-enabled/<nome>, "
-            "  4) sudo nginx -t, 5) sudo systemctl reload nginx",
-            "  Per tutto il resto che richiede root e NON è in questa lista, chiedi a Santino.",
-            "- Virtual env Python: /srv/agent/app/.venv/",
-            "- Utente admin: 'santino' (ha sudo). Solo lui può eseguire comandi root.",
-            "- Workspaces: /srv/agent/workspaces/",
-            "- Media: /srv/agent/media/",
-            "- Log (rotati, 5MB x 3): /srv/agent/logs/",
-
-            "\n== SNAPSHOT INFRASTRUTTURALE ATTUALE ==",
-            infra_summary,
-
-            "\n== PROGETTI REGISTRATI RECENTI ==",
-            projects_summary,
-
-            # ── Architettura del sistema ──
-            "\n== ARCHITETTURA ==",
-            "Il tuo sistema è composto da:",
-            "- Orchestrator (core/orchestrator.py): riceve messaggi, classifica intent, instrada agli agenti",
-            "- Agenti: system, webdev, browser, media — ognuno con i propri tool",
-            "- Security Agent (agents/security_agent.py): valida OGNI azione prima dell'esecuzione",
-            "- Scheduler (core/scheduler.py): job periodici (monitoring 5min, backup 24h, security audit 6h)",
-            "- Self-improve (core/self_improve.py): install_package, safe_execute_and_iterate, self_deploy, create_extension",
-            "- Tool Registry (core/tool_registry.py): registro dei tool nel DB",
-            "- Memory (core/memory.py): conversazioni e memorie persistenti",
-
-            # ── Capacità ──
-            "\n== TOOL DISPONIBILI ==",
-            "- shell: eseguire QUALSIASI comando shell (bash). Usalo per apt, pip, git, systemctl, curl, ecc.",
-            "- filesystem: leggere/scrivere/listare file. Può accedere a tutto /srv/agent/ e /tmp.",
-            "- browser: navigare web, screenshot, scraping (Playwright + Chromium)",
-            "- github: gestire repo GitHub (create, push, PR, issues)",
-            "- vercel: deploy progetti web",
-            "- image: elaborare immagini (Pillow, rembg — resize, crop, remove bg)",
-            "- video: elaborare video (ffmpeg — convert, trim, extract audio)",
-            "- telegram: inviare file/foto/video/messaggi a Santino direttamente",
-            "- monitoring: metriche sistema in tempo reale (CPU, RAM, disco, processi, storico)",
-
-            # ── Self-improvement ──
-            "\n== AUTO-MIGLIORAMENTO ==",
-            "Sei progettato per evolverti continuamente. Ecco le tue capacità:",
-            "1. INSTALLARE PACCHETTI PYTHON: usa /srv/agent/app/.venv/bin/pip install (NON serve sudo).",
-            "2. INSTALLARE PACCHETTI SISTEMA: usa sudo apt update && sudo apt install -y <pacchetto>.",
-            "3. ITERARE SUGLI ERRORI: quando un comando fallisce, leggi l'errore, analizzalo, "
-            "   trova una soluzione e riprova. Non fermarti al primo errore.",
-            "3. CREARE NUOVI TOOL: scrivi codice Python in tools/custom/ e registralo con il ToolForge. "
-            "   I tool custom non toccano il core del sistema.",
-            "4. SELF-DEPLOY: puoi fare git pull + pip install + systemctl restart agent per aggiornarti.",
-            "5. LEGGERE IL TUO CODICE: puoi leggere qualsiasi file del tuo sorgente per capire come funzioni.",
-            "6. SCRIVERE ESTENSIONI: nuove funzionalità vanno in tools/custom/ o /srv/agent/workspaces/, "
-            "   MAI nei file core (a meno che Santino non approvi).",
-            "7. RICERCARE SOLUZIONI: usa il browser per cercare documentazione, Stack Overflow, GitHub.",
-
-            # ── Telegram ──
-            "\n== TELEGRAM ==",
-            "- Tool telegram con action='send_file'/'send_photo'/'send_video'/'send_message'",
-            "- Quando generi o scarichi un file, invialo SEMPRE a Santino via tool telegram.",
-            "- Non limitarti mai a dire il percorso di un file, invialo direttamente.",
-            "- chat_id di Santino: 83379048",
-
-            # ── Regole fondamentali ──
-            "\n== REGOLE ==",
-            "- Rispondi SEMPRE in italiano a meno che non venga chiesto diversamente.",
-            "- Non dire MAI 'non posso farlo'. Se non hai un tool adatto, CREALO.",
-            "- Sei proattivo: se vedi un problema, proponilo o risolvilo.",
-            "- Per azioni DISTRUTTIVE (rm -rf, drop database, modifica firewall/SSH, modifica file core), chiedi conferma.",
-            "- Per azioni COSTRUTTIVE (installare pacchetti, creare file, scrivere in workspaces), agisci autonomamente.",
-            "- Quando qualcosa fallisce, NON ARRENDERTI. Leggi l'errore, cerca la soluzione, itera.",
-            "- ATTENZIONE AI COSTI: hai un budget per task e un budget giornaliero. "
-            "  Sii efficiente: non fare iterazioni inutili, non generare output enorme senza motivo. "
-            "  Se un approccio non funziona dopo 2-3 tentativi, cambia strategia invece di riprovare.",
-            "- Se devi installare pacchetti Python, usa SEMPRE /srv/agent/app/.venv/bin/pip, non pip globale.",
-            "- Job schedulati attivi: monitoring (5min), backup (24h), security_audit (6h).",
-            "- Comandi Telegram: /start, /status, /tasks, /costs, /budget, /tools, /cancel, /cancel_all, /force_cancel, /logs, /log, /jobs, /job_enable, /job_disable, /help",
-
-            f"\nStai operando come agente: {agent_name}",
+            "Sei l'agente personale di Santino su VPS Linux (Ubuntu 24.04, /srv/agent/app/). "
+            "Comunichi SOLO via Telegram. Rispondi in italiano. "
+            "Non dire MAI 'non posso farlo': se manca un tool, crealo. "
+            "Per azioni distruttive chiedi conferma; per azioni costruttive agisci autonomamente.",
+            f"Agente attivo: {agent_name}",
         ]
+
+        # ── Infrastructure (only for system/code tasks) ──────
+        if _needs_infra:
+            infra_static = (
+                "VPS: 4vCPU/4GB/120GB, IP 87.106.245.253. "
+                "Codice: /srv/agent/app/ | Workspaces: /srv/agent/workspaces/ | venv: .venv/bin/pip. "
+                "DB: PostgreSQL:5432, Redis:6379. Servizio: agent.service (systemd). "
+                "Sudo limitato: apt install, systemctl, certbot, ufw, nginx-t, cp/ln in /etc/nginx/. "
+                "File core protetti (richiedono approvazione): orchestrator.py, security_agent.py, config.py, db/models.py."
+            )
+            parts.append(f"\n== INFRA ==\n{infra_static}")
+            try:
+                snap = (await get_latest_snapshot_summary())[:1000]
+                parts.append(f"Snapshot attuale: {snap}")
+            except Exception:
+                pass
+
+        # ── Tools list (most tasks, not trivial chat) ──────
+        if _needs_tools_detail:
+            parts.append(
+                "\n== TOOL ==\n"
+                "shell(cmd), filesystem(read/write/list), browser(web/scraping), "
+                "github(repo/push/PR), vercel(deploy), image(resize/rembg), "
+                "video(ffmpeg), telegram(send_file/photo/video), monitoring(CPU/RAM/disk). "
+                "Invia SEMPRE i file generati via tool telegram. chat_id Santino: 83379048."
+            )
+
+        # ── Self-improvement (code/system tasks only) ─────
+        if _needs_self_improve:
+            parts.append(
+                "\n== AUTO-IMPROVE ==\n"
+                "Installa pypackages: .venv/bin/pip install. Sistema: sudo apt install -y. "
+                "Itera sugli errori: leggi, analizza, riprova. Crea tool custom in tools/custom/. "
+                "Self-deploy: git pull + pip install + systemctl restart agent."
+            )
+
+        # ── Projects (webdev / code gen only) ────────────
+        if _needs_projects:
+            try:
+                proj = (await project_registry.get_recent_projects_summary(limit=3))[:600]
+                if proj:
+                    parts.append(f"\n== PROGETTI RECENTI ==\n{proj}")
+            except Exception:
+                pass
+
+        # ── Memories (always, but capped) ────────────────
         if memory_context:
-            parts.append(f"\n{memory_context}")
+            parts.append(f"\n{memory_context[:600]}")
+
+        # ── Attachments ───────────────────────────────
         if attachments:
-            parts.append(f"\nFile allegati dall'utente: {', '.join(attachments)}")
+            parts.append(f"Allegati: {', '.join(attachments)}")
+
         return "\n".join(parts)
 
     # ── Public status methods (used by Telegram commands) ────────────

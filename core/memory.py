@@ -42,7 +42,7 @@ class Memory:
             await session.commit()
 
     async def get_conversation_history(
-        self, user_id: int, limit: int = 20
+        self, user_id: int, limit: int = 4
     ) -> list[dict[str, str]]:
         """Get recent conversation messages formatted for LLM context."""
         async with async_session() as session:
@@ -54,7 +54,8 @@ class Memory:
             )
             rows = list(result.scalars().all())
             rows.reverse()  # chronological order
-            return [{"role": r.role, "content": r.content} for r in rows]
+            # Truncate each message to avoid blowing up context
+            return [{"role": r.role, "content": r.content[:1500]} for r in rows]
 
     # ── Long-term memory ─────────────────────────────────────────────
 
@@ -114,6 +115,44 @@ class Memory:
                 {"key": r.key, "value": r.value, "category": r.category}
                 for r in result.scalars().all()
             ]
+
+    async def recall_recent(
+        self,
+        user_id: int,
+        limit: int = 5,
+        value_max_chars: int = 200,
+    ) -> list[dict[str, str]]:
+        """Return the most recent N memories, values truncated to save tokens.
+
+        Skips bulk task_history entries beyond the first 3 to avoid
+        flooding the context with old task outcomes.
+        """
+        async with async_session() as session:
+            result = await session.execute(
+                select(AgentMemory)
+                .where(AgentMemory.user_id == user_id)
+                .order_by(AgentMemory.id.desc())
+                .limit(50)  # fetch a buffer, then filter below
+            )
+            rows = list(result.scalars().all())
+
+        out: list[dict[str, str]] = []
+        task_history_count = 0
+        for r in rows:
+            if r.category == "task_history":
+                task_history_count += 1
+                if task_history_count > 3:
+                    continue  # skip old task outcomes
+            out.append({
+                "key": r.key,
+                "value": r.value[:value_max_chars],
+                "category": r.category,
+            })
+            if len(out) >= limit:
+                break
+
+        out.reverse()  # chronological order back
+        return out
 
     async def forget(self, user_id: int, key: str):
         async with async_session() as session:
