@@ -110,14 +110,21 @@ completa dei file da creare. Struttura:
   "description": "breve descrizione",
   "deploy_target": "vercel",
   "files": [
-    {"path": "src/app/page.tsx", "description": "Home page con tutte le sezioni"},
-    {"path": "src/components/Hero.tsx", "description": "Hero component full-screen"},
-    ...
+    {"path": "package.json", "description": "Dipendenze del progetto", "wave": 1},
+    {"path": "src/lib/utils.ts", "description": "Utility condivise", "wave": 2},
+    {"path": "src/components/Hero.tsx", "description": "Hero component full-screen", "wave": 3},
+    {"path": "src/app/page.tsx", "description": "Home page con tutte le sezioni", "wave": 4}
   ],
   "notes": "note tecniche"
 }
-Includi TUTTI i file necessari: layout, pagine, componenti, stili, config, package.json, README.
-Non omettere nulla. Sii preciso."""
+
+Assegna OBBLIGATORIAMENTE il campo "wave" (intero 1-4) a ogni file seguendo questa logica:
+- Wave 1 (Configurazione): package.json, tsconfig.json, tailwind.config.*, next.config.*, .env.example, README.md, Dockerfile, .gitignore
+- Wave 2 (Core condiviso): lib/, utils/, types/, styles/globals.css, hooks/, store/, context/
+- Wave 3 (Componenti UI): components/ di ogni tipo (Header, Footer, Hero, Card, etc.)
+- Wave 4 (Pagine e routes): app/, pages/, api/ — tutto ciò che assembla i componenti
+
+Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
 
         plan_raw = await self._llm_call(
             system_prompt=_FILE_PLAN_PROMPT,
@@ -185,6 +192,114 @@ Non omettere nulla. Sii preciso."""
             model_override=get_model_for_task(task_type),
         )
 
+    def _files_to_xml_tasks(self, files: list[dict], workdir: str, wave: int) -> str:
+        """Convert a list of file dicts into an XML task block for the builder LLM."""
+        task_items = []
+        for f in files:
+            path = f.get("path", "")
+            desc = f.get("description", "")
+            task_items.append(
+                f"  <task>\n"
+                f"    <path>{workdir}/{path}</path>\n"
+                f"    <action>Crea {path}: {desc}. "
+                f"Codice completo e production-ready, zero placeholder o TODO.</action>\n"
+                f"    <verify>File esiste, nessun placeholder, sintassi corretta, import validi</verify>\n"
+                f"  </task>"
+            )
+        header = f'<tasks wave="{wave}" count="{len(files)}">'
+        return header + "\n" + "\n".join(task_items) + "\n</tasks>"
+
+    async def _build_by_waves(
+        self,
+        plan: dict,
+        design_system_section: str,
+        specs_context: str,
+        user_message: str,
+        workdir: str,
+        task_id: int,
+        state_files: dict,
+    ) -> str:
+        """Execute the build phase wave by wave.
+
+        Each wave gets a fresh agent run (fresh context window). Waves are
+        sequential (later waves depend on earlier ones). Within a wave, all
+        files are tackled in a single agentic loop via XML task blocks.
+        """
+        # Group files by wave number
+        waves: dict[int, list[dict]] = {}
+        for f in plan.get("files", []):
+            w = int(f.get("wave", 2))
+            waves.setdefault(w, []).append(f)
+
+        results: list[str] = []
+        total_waves = len(waves)
+
+        # Wave 0: write PROJECT.md / REQUIREMENTS.md / PM_CONTEXT.md to disk
+        project_md = state_files.get("project_md", "")
+        requirements_md = state_files.get("requirements_md", "")
+        pm_context = state_files.get("pm_context", "")
+        if project_md or requirements_md or pm_context:
+            state_instructions = f"Crea la directory {workdir}/ se non esiste.\n"
+            if project_md:
+                state_instructions += (
+                    f"\nScrivi il file {workdir}/PROJECT.md con esattamente questo contenuto:\n"
+                    f"```\n{project_md}\n```\n"
+                )
+            if requirements_md:
+                state_instructions += (
+                    f"\nScrivi il file {workdir}/REQUIREMENTS.md con esattamente questo contenuto:\n"
+                    f"```\n{requirements_md}\n```\n"
+                )
+            if pm_context:
+                state_instructions += (
+                    f"\nScrivi il file {workdir}/PM_CONTEXT.md con esattamente questo contenuto:\n"
+                    f"```\n{pm_context}\n```\n"
+                    "Questo file è il contesto permanente del Project Manager per questo progetto. "
+                    "Non modificarne la struttura."
+                )
+            await self._run_phase(
+                phase_name="Wave 0 — Stato progetto",
+                system_prompt=(
+                    "Sei un DevOps Engineer. Crea i file richiesti sul filesystem "
+                    "esattamente come indicato, senza modifiche al contenuto."
+                ),
+                user_content=state_instructions,
+                task_id=task_id,
+                task_type=TaskType.TOOL_EXECUTION,
+                progress=15,
+            )
+
+        for wave_num in sorted(waves.keys()):
+            wave_files = waves[wave_num]
+            wave_progress = 20 + int((wave_num - 1) / max(total_waves, 1) * 35)
+            xml_tasks = self._files_to_xml_tasks(wave_files, workdir, wave_num)
+
+            wave_context = (
+                f"Richiesta originale: {user_message}\n\n"
+                f"Stack: {plan.get('tech_stack', '')}\n"
+                f"Directory di lavoro: {workdir}\n\n"
+                f"── WAVE {wave_num}/{total_waves} ──\n"
+                f"Implementa TUTTI i file elencati qui sotto. Ogni <task> è un file da creare:\n\n"
+                f"{xml_tasks}\n\n"
+                f"Data corrente: 2026-04-08\n"
+                f"Prima di scrivere package.json o requirements, verifica le versioni correnti "
+                f"via `npm view <pkg> version` o browser.\n"
+                f"{specs_context}"
+                f"{design_system_section}"
+            )
+
+            result = await self._run_phase(
+                phase_name=f"Wave {wave_num}/{total_waves} — Build",
+                system_prompt=_BUILDER_PROMPT,
+                user_content=wave_context,
+                task_id=task_id,
+                task_type=TaskType.CODE_GENERATION,
+                progress=wave_progress,
+            )
+            results.append(f"[Wave {wave_num}] {result[:300]}")
+
+        return "\n\n".join(results)
+
     # ── Main entry point ───────────────────────────────────────────────────────
 
     async def run(
@@ -196,6 +311,7 @@ Non omettere nulla. Sii preciso."""
         model_override: str | None = None,
         specs: dict | None = None,
         design_system: dict | None = None,
+        state_files: dict | None = None,
     ) -> str:
 
         # ── FASE 1: PLANNER ──────────────────────────────────────────────────
@@ -235,8 +351,8 @@ Non omettere nulla. Sii preciso."""
             f"📄 File pianificati: {len(plan.get('files', []))}"
         )
 
-        # ── FASE 2: BUILDER ──────────────────────────────────────────────────
-        await notify("👨‍💻 <b>WebDev</b> — <b>FASE 2/4</b>: Sviluppo codice…")
+        # ── FASE 2: BUILDER (wave execution) ────────────────────────────────
+        await notify("👨‍💻 <b>WebDev</b> — <b>FASE 2/4</b>: Sviluppo codice (wave execution)…")
         await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=20)
 
         # Inject design system if available
@@ -262,25 +378,14 @@ Non omettere nulla. Sii preciso."""
                 + json.dumps(specs.get("pages", []), indent=2, ensure_ascii=False)
             )
 
-        builder_context = (
-            f"Richiesta originale: {user_message}\n\n"
-            f"Piano architetturale:\n{json.dumps(plan, indent=2, ensure_ascii=False)}\n\n"
-            f"Directory di lavoro: {workdir}\n\n"
-            f"Data corrente: 2026-04-03\n"
-            f"Prima di scrivere package.json/requirements, controlla versioni correnti online "
-            f"(npm view, pip index, browser) e usa dipendenze aggiornate o quasi.\n"
-            f"{specs_context}"
-            f"{design_system_section}\n\n"
-            f"Crea tutti i file indicati nel piano rispettando ESATTAMENTE il design system."
-        )
-
-        build_result = await self._run_phase(
-            phase_name="Build",
-            system_prompt=_BUILDER_PROMPT,
-            user_content=builder_context,
+        build_result = await self._build_by_waves(
+            plan=plan,
+            design_system_section=design_system_section,
+            specs_context=specs_context,
+            user_message=user_message,
+            workdir=workdir,
             task_id=task_id,
-            task_type=TaskType.CODE_GENERATION,
-            progress=20,
+            state_files=state_files or {},
         )
 
         # ── FASE 3: REVIEWER ────────────────────────────────────────────────

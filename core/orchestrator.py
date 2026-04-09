@@ -15,6 +15,7 @@ from core.inventory import get_latest_snapshot_summary
 from core.model_router import CLASSIFICATION_PROMPT, TaskType, get_model_for_task
 from core.openrouter_client import openrouter
 from core.project_registry import project_registry
+from core.project_selector import end_selector, get_selector, start_selector
 from core.reflection import reflection_engine
 from core.task_manager import task_manager
 from core.webdev_planner import PLANNING_QUESTIONS, get_session, start_session
@@ -118,20 +119,22 @@ class Orchestrator:
         if self._is_tool_creation_request(message, task_type):
             task_type = TaskType.CODE_GENERATION
 
-        # ── WebDev planning: start Q&A session instead of direct execution ──
+        # ── WebDev: project selector or new Q&A session ──────────────────────
         if task_type == TaskType.WEB_DEV and get_session(user_id) is None:
-            session = start_session(user_id, message)
-            q = session.current_question
-            total = len(PLANNING_QUESTIONS)
-            return (
-                f"🌐 <b>Perfetto! Creiamo il tuo sito.</b>\n\n"
-                f"Prima ho bisogno di capire meglio il progetto. "
-                f"Ti farò <b>{total} domande rapide</b> e poi partirò subito.\n\n"
-                f"Puoi anche mandare un file JSON/TXT con le specifiche "
-                f"e salteremo le domande.\n\n"
-                f"{session.progress_bar()}\n\n"
-                f"{q['question']}"
-            )
+            # Check for existing active projects
+            try:
+                all_projects = await project_registry.list_projects(limit=30)
+                active_projects = [p for p in all_projects if p.status in ("active", "building")]
+            except Exception:
+                active_projects = []
+
+            if active_projects:
+                # Show project selector — the handler will pick this up next message
+                selector = start_selector(user_id, active_projects, message)
+                return selector.format_menu()
+
+            # No existing projects → start Q&A immediately
+            return self._start_new_webdev_session(user_id, message)
         # ─────────────────────────────────────────────────────────────────────
 
         # Pick agent and model
@@ -282,6 +285,107 @@ class Orchestrator:
         # Keep Telegram quiet for operational startup messages.
         return ""
 
+    # ── WebDev helpers ────────────────────────────────────────────────
+
+    def _start_new_webdev_session(self, user_id: int, message: str) -> str:
+        """Start a Q&A planning session for a brand-new project and return the first question."""
+        session = start_session(user_id, message)
+        q = session.current_question
+        total = len(PLANNING_QUESTIONS)
+        return (
+            f"🌐 <b>Perfetto! Creiamo il tuo sito.</b>\n\n"
+            f"Prima ho bisogno di capire meglio il progetto. "
+            f"Ti farò <b>{total} domande rapide</b> e poi partirò subito.\n\n"
+            f"Puoi anche mandare un file JSON/TXT con le specifiche "
+            f"e salteremo le domande.\n\n"
+            f"{session.progress_bar()}\n\n"
+            f"{q['question']}"
+        )
+
+    def _create_pm_agent(self, project):
+        """Instantiate a ProjectManagerAgent for an existing project with all tools."""
+        from agents.project_manager_agent import ProjectManagerAgent
+        return ProjectManagerAgent.from_project(tools=dict(self._tools), project=project)
+
+    async def handle_project_modification(
+        self,
+        user_id: int,
+        project,  # ProjectRegistry
+        user_message: str,
+        chat_id: int,
+    ) -> None:
+        """Run the PM agent for a modification request on an existing project.
+
+        Always runs in background. The PM agent is the sole user-facing actor.
+        """
+        from agents.project_manager_agent import ProjectManagerAgent
+
+        pm_agent = self._create_pm_agent(project)
+        if pm_agent is None:
+            await notify(
+                f"⚠️ Impossibile caricare il PM agent per <b>{project.name}</b>.\n"
+                "Procedo con l'agente WebDev base."
+            )
+            # Fallback: treat as new task with the webdev agent
+            agent = self._agents.get("webdev")
+            if not agent:
+                await notify("❌ Nessun agente webdev disponibile.")
+                return
+        else:
+            agent = pm_agent
+
+        model = get_model_for_task(TaskType.WEB_DEV)
+        task = await task_manager.create_task(
+            user_id=user_id,
+            description=f"[pm:{project.name}] {user_message[:460]}",
+            task_type=TaskType.WEB_DEV.value,
+            agent="project_manager",
+            model=model,
+        )
+
+        async def _bg():
+            t0 = time.monotonic()
+            try:
+                response = await agent.run(
+                    user_message=user_message,
+                    task_id=task.id,
+                    model_override=model,
+                )
+                duration = time.monotonic() - t0
+                await task_manager.complete_task(task.id, cost=cost_tracker.total_cost)
+                await memory.save_message(user_id, "assistant", response, model=model)
+                asyncio.create_task(reflection_engine.analyze_task(
+                    user_id=user_id,
+                    task_id=task.id,
+                    task_type=TaskType.WEB_DEV.value,
+                    user_message=user_message,
+                    outcome=response,
+                    success=True,
+                    cost=cost_tracker.get_task_cost(task.id),
+                    duration_seconds=duration,
+                ))
+                await notify_done(user_message[:60], response)
+            except Exception as exc:
+                duration = time.monotonic() - t0
+                log.error(f"PM task #{task.id} failed: {exc}", exc_info=True)
+                await task_manager.fail_task(task.id, str(exc))
+                asyncio.create_task(reflection_engine.analyze_task(
+                    user_id=user_id,
+                    task_id=task.id,
+                    task_type=TaskType.WEB_DEV.value,
+                    user_message=user_message,
+                    outcome=str(exc),
+                    success=False,
+                    cost=cost_tracker.get_task_cost(task.id),
+                    duration_seconds=duration,
+                ))
+                await notify_error(user_message[:60], str(exc))
+            finally:
+                task_manager.unregister_running_task(task.id)
+
+        atask = asyncio.create_task(_bg())
+        task_manager.register_running_task(task.id, atask)
+
     # ── WebDev task (called after Q&A planning completes) ────────────
 
     async def handle_webdev_task(
@@ -292,6 +396,7 @@ class Orchestrator:
         design_system: dict,
         media_files: list[str],
         chat_id: int,
+        state_files: dict | None = None,
     ) -> None:
         """Run the WebDev pipeline with pre-built specs and design system.
 
@@ -327,12 +432,32 @@ class Orchestrator:
                     task_id=task.id,
                     specs=specs,
                     design_system=design_system,
+                    state_files=state_files or {},
                     system_prompt=system_prompt,
                     model_override=model,
                 )
                 duration = time.monotonic() - t0
                 await task_manager.complete_task(task.id, cost=cost_tracker.total_cost)
                 await memory.save_message(user_id, "assistant", response, model=model)
+
+                # Register project in registry (pm_context stored in metadata)
+                project_name = specs.get("project_name", "")
+                if project_name:
+                    pm_ctx = (state_files or {}).get("pm_context", "")
+                    workdir = f"/srv/agent/workspaces/{project_name}"
+                    try:
+                        await project_registry.upsert_project(
+                            name=project_name,
+                            description=specs.get("description", "")[:500],
+                            workspace_path=workdir,
+                            deploy_provider="vercel",
+                            status="active",
+                            metadata_json={"pm_context": pm_ctx[:8000]} if pm_ctx else None,
+                        )
+                        log.info(f"[orchestrator] Project '{project_name}' registered in registry")
+                    except Exception as reg_exc:
+                        log.warning(f"[orchestrator] Failed to register project: {reg_exc}")
+
                 asyncio.create_task(reflection_engine.analyze_task(
                     user_id=user_id,
                     task_id=task.id,

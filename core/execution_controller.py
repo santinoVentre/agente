@@ -16,7 +16,7 @@ from utils.logging import setup_logging
 log = setup_logging("execution_controller")
 
 MAX_STEPS: int = 8
-MAX_TOKENS_PER_TASK: int = 15_000
+MAX_TOKENS_PER_TASK: int = 100_000
 MAX_SAME_ACTION: int = 2
 SUMMARY_INTERVAL: int = 3   # compress context every N steps
 MAX_RETRIES: int = 3        # per-action retry cap before model escalation

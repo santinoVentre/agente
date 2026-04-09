@@ -68,7 +68,7 @@ class Config:
 
     # --- Execution controller ---
     max_steps_per_task: int = field(default_factory=lambda: _env_int("MAX_STEPS_PER_TASK", 8))
-    max_tokens_per_task: int = field(default_factory=lambda: _env_int("MAX_TOKENS_PER_TASK", 15_000))
+    max_tokens_per_task: int = field(default_factory=lambda: _env_int("MAX_TOKENS_PER_TASK", 100_000))
     context_summary_interval: int = field(default_factory=lambda: _env_int("CONTEXT_SUMMARY_INTERVAL", 3))
 
     # --- Security ---

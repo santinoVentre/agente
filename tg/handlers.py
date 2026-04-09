@@ -289,6 +289,60 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     # ─────────────────────────────────────────────────────────────────────
 
+    # ── Project selector intercept ────────────────────────────────────────
+    from core.project_selector import get_selector, end_selector, start_selector
+    from core.webdev_planner import get_session as _get_ws, start_session, PLANNING_QUESTIONS
+    selector = get_selector(user_id)
+    if selector:
+        # Abort
+        if text.strip().lower() in ("/annulla", "/abort", "annulla", "abort", "/cancel"):
+            end_selector(user_id)
+            await update.message.reply_text("❌ Selezione annullata.")
+            return
+
+        result = selector.resolve(text)
+        if result is False:
+            await update.message.reply_text(
+                "Non ho capito. Rispondi con il <b>numero</b> del progetto "
+                "o <b>0</b> per crearne uno nuovo.",
+                parse_mode="HTML",
+            )
+            return  # keep selector active
+
+        end_selector(user_id)
+
+        if result is None:
+            # New project — start Q&A
+            ws = start_session(user_id, selector.pending_message)
+            q = ws.current_question
+            total = len(PLANNING_QUESTIONS)
+            await update.message.reply_text(
+                f"🌐 <b>Perfetto! Creiamo un nuovo sito.</b>\n\n"
+                f"Ti farò <b>{total} domande rapide</b> e poi partirò subito.\n\n"
+                f"Puoi anche mandare un file JSON/TXT con le specifiche "
+                f"e salteremo le domande.\n\n"
+                f"{ws.progress_bar()}\n\n"
+                f"{q['question']}",
+                parse_mode="HTML",
+            )
+        else:
+            # Existing project → PM agent
+            await update.message.reply_text(
+                f"🧑‍💼 <b>PM Agent: {result.name}</b>\n"
+                f"Prendo in carico la richiesta…",
+                parse_mode="HTML",
+            )
+            await update.message.chat.send_action("typing")
+            if _orchestrator:
+                await _orchestrator.handle_project_modification(
+                    user_id=user_id,
+                    project=result,
+                    user_message=selector.pending_message,
+                    chat_id=update.effective_chat.id,
+                )
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
     # Show typing indicator
     await update.message.chat.send_action("typing")
 
@@ -492,6 +546,11 @@ async def _handle_planning_answer(session, text: str, update: Update) -> str | N
                     design_system=result["design_system"],
                     media_files=result["media"],
                     chat_id=update.effective_chat.id,
+                    state_files={
+                        "project_md": result.get("project_md", ""),
+                        "requirements_md": result.get("requirements_md", ""),
+                        "pm_context": result.get("pm_context", ""),
+                    },
                 )
         except Exception as exc:
             log.error(f"Planning finalization error: {exc}", exc_info=True)
@@ -615,6 +674,11 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         design_system=result["design_system"],
                         media_files=result["media"],
                         chat_id=update.effective_chat.id,
+                        state_files={
+                            "project_md": result.get("project_md", ""),
+                            "requirements_md": result.get("requirements_md", ""),
+                            "pm_context": result.get("pm_context", ""),
+                        },
                     )
                 return
             except Exception as exc:

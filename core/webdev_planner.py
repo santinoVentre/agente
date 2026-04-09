@@ -249,6 +249,9 @@ class WebDevPlanningSession:
     completed: bool = False
     specs: dict | None = None
     design_system: dict | None = None
+    project_md: str = ""
+    requirements_md: str = ""
+    pm_context: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
@@ -296,12 +299,19 @@ class WebDevPlanningSession:
 
         self.specs = await _generate_specs(self.initial_message, self.answers)
         self.design_system = await _generate_design_system(self.specs, self.answers)
+        self.project_md, self.requirements_md = await _generate_state_files(self.specs, self.answers)
+        self.pm_context = await _generate_pm_context(
+            self.specs, self.design_system, self.answers, self.project_md, self.requirements_md
+        )
         self.completed = True
         log.info(f"[webdev_planner] Session finalized for user {self.user_id}: {self.specs.get('project_name')}")
         return {
             "specs": self.specs,
             "design_system": self.design_system,
             "media": self.media_files,
+            "project_md": self.project_md,
+            "requirements_md": self.requirements_md,
+            "pm_context": self.pm_context,
         }
 
     def format_specs_summary(self) -> str:
@@ -396,6 +406,140 @@ async def _generate_specs(initial_message: str, answers: dict) -> dict:
             "tech_stack": "Next.js 15 + Tailwind CSS 4",
             "pages": [{"name": "Home", "slug": "/", "sections": ["hero", "cta"]}],
         }
+
+
+_STATE_FILES_PROMPT = """\
+Dato un documento di specifiche di progetto web, genera due file markdown di stato da salvare nel repo.
+
+Restituisci SOLO un oggetto JSON valido:
+{
+  "project_md": "# NomeProgetto\\n\\n## Visione\\n...\\n\\n## Stack\\n...\\n\\n## Target Audience\\n...",
+  "requirements_md": "# Requirements\\n\\n## v1 — Must Have\\n- ...\\n\\n## v2 — Nice to Have\\n- ...\\n\\n## Out of scope\\n- ..."
+}
+
+PROJECT.md: visione del progetto, stack tecnico, audience, tone of voice, URL deploy previsto (max 250 parole).
+REQUIREMENTS.md: divide i requisiti in v1 (funzionalità che DEVONO esserci al lancio), v2 (future), out-of-scope."""
+
+
+_PM_CONTEXT_PROMPT = """\
+Sei un esperto di project management software. Ricevi i dati completi di un progetto web \
+appena pianificato e devi generare il documento `PM_CONTEXT.md`.
+
+Questo documento sarà il "cervello permanente" del Project Manager AI dedicato a questo progetto.
+Ogni volta che il cliente chiederà una modifica futura, l'agente PM carica questo file e \
+risponde/delega con piena conoscenza del contesto.
+
+Il documento DEVE permettere all'agente di:
+1. Rispondere a qualsiasi domanda sul progetto senza cercare altrove
+2. Valutare se una richiesta è in scope v1, v2 o fuori scope
+3. Prendere decisioni tecniche coerenti con l'architettura e il design system scelti
+4. Ricordare le preferenze, il tono e le aspettative del cliente
+5. Sapere con certezza dove sono i file e come è strutturato il codice
+
+Genera il documento Markdown COMPLETO e STRUTTURATO. Nessun codeblock wrapper, solo il markdown grezzo."""
+
+_PM_CONTEXT_USER_TEMPLATE = """\
+## Dati del progetto
+
+### Specs
+{specs_json}
+
+### Design System
+{design_system_json}
+
+### Risposte Q&A del cliente
+{qa_json}
+
+### PROJECT.md già generato
+{project_md}
+
+### REQUIREMENTS.md già generato
+{requirements_md}
+"""
+
+
+async def _generate_pm_context(
+    specs: dict,
+    design_system: dict,
+    answers: dict,
+    project_md: str,
+    requirements_md: str,
+) -> str:
+    """Generate the full PM_CONTEXT.md content from project data."""
+    model = get_model_for_task(TaskType.COMPLEX_REASONING)
+
+    user_content = _PM_CONTEXT_USER_TEMPLATE.format(
+        specs_json=json.dumps(specs, indent=2, ensure_ascii=False)[:1500],
+        design_system_json=json.dumps(design_system, indent=2, ensure_ascii=False)[:800],
+        qa_json=json.dumps(answers, indent=2, ensure_ascii=False)[:800],
+        project_md=project_md[:500],
+        requirements_md=requirements_md[:500],
+    )
+
+    response = await openrouter.chat(
+        model=model,
+        messages=[
+            {"role": "system", "content": _PM_CONTEXT_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0.2,
+        max_tokens=2000,
+    )
+    raw = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    if not raw:
+        # Minimal fallback
+        cp = design_system.get("color_palette", {})
+        ty = design_system.get("typography", {})
+        return (
+            f"# PM Context: {specs.get('business_name', specs.get('project_name'))}\n\n"
+            f"## Visione\n{specs.get('description', '')}\n\n"
+            f"## Stack\n{specs.get('tech_stack', '')}\n\n"
+            f"## Target\n{specs.get('target_audience', '')}\n\n"
+            f"## Design System\n"
+            f"- Primary: {cp.get('primary', '')} | Accent: {cp.get('accent', '')}\n"
+            f"- Font: {ty.get('heading_font', '')} / {ty.get('body_font', '')}\n"
+            f"- Stile: {design_system.get('component_style', '')}\n\n"
+            f"## Requisiti v1\n{requirements_md[:600]}\n\n"
+            "## Storico modifiche\n"
+        )
+    # Ensure there's a changelog section
+    if "## Storico modifiche" not in raw:
+        raw += "\n\n## Storico modifiche\n"
+    return raw
+
+
+async def _generate_state_files(specs: dict, answers: dict) -> tuple[str, str]:
+    """Generate PROJECT.md and REQUIREMENTS.md content strings from project specs."""
+    model = get_model_for_task(TaskType.COMPLEX_REASONING)
+    context = json.dumps({"specs": specs, "q_and_a": answers}, indent=2, ensure_ascii=False)[:3000]
+    response = await openrouter.chat(
+        model=model,
+        messages=[
+            {"role": "system", "content": _STATE_FILES_PROMPT},
+            {"role": "user", "content": context},
+        ],
+        temperature=0.2,
+        max_tokens=1200,
+    )
+    raw = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    try:
+        js = raw[raw.find("{"):raw.rfind("}") + 1]
+        data = json.loads(js)
+        return data.get("project_md", ""), data.get("requirements_md", "")
+    except (json.JSONDecodeError, ValueError):
+        log.warning(f"[webdev_planner] State files non-JSON: {raw[:200]}")
+        project_md = (
+            f"# {specs.get('business_name', specs.get('project_name', 'Progetto'))}\n\n"
+            f"{specs.get('description', '')}\n\n"
+            f"**Stack:** {specs.get('tech_stack', '')}\n"
+            f"**Target:** {specs.get('target_audience', '')}\n"
+            f"**Tone:** {specs.get('tone_of_voice', '')}"
+        )
+        requirements_md = (
+            "# Requirements\n\n## v1 — Must Have\n"
+            + "\n".join(f"- {f}" for f in specs.get("features", []))
+        )
+        return project_md, requirements_md
 
 
 async def _generate_design_system(specs: dict, answers: dict) -> dict:
