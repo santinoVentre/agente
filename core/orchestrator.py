@@ -580,6 +580,10 @@ class Orchestrator:
             except Exception:
                 pass
 
+        # ── Environment / config (same audience as tools) ──────
+        if _needs_tools_detail:
+            parts.append(f"\n{config.get_env_summary()}")
+
         # ── Tools list (most tasks, not trivial chat) ──────
         if _needs_tools_detail:
             parts.append(
