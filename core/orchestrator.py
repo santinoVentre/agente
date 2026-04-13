@@ -386,6 +386,75 @@ class Orchestrator:
         atask = asyncio.create_task(_bg())
         task_manager.register_running_task(task.id, atask)
 
+    async def handle_project_modification_sync(
+        self,
+        user_id: int,
+        project,  # ProjectRegistry
+        user_message: str,
+        chat_id: int,
+        history: list[dict] | None = None,
+    ) -> str:
+        """Run PM modification in foreground and return a direct chat response.
+
+        Used by the Telegram PM session mode where each user message should be
+        treated as part of the same PM conversation.
+        """
+        pm_agent = self._create_pm_agent(project)
+        if pm_agent is None:
+            return (
+                f"⚠️ Non riesco a caricare il PM context per {project.name}. "
+                "Puoi cambiare progetto o rigenerare il contesto PM."
+            )
+
+        model = get_model_for_task(TaskType.WEB_DEV)
+        await memory.save_message(user_id, "user", user_message)
+        task = await task_manager.create_task(
+            user_id=user_id,
+            description=f"[pm:{project.name}] {user_message[:460]}",
+            task_type=TaskType.WEB_DEV.value,
+            agent="project_manager",
+            model=model,
+        )
+        await task_manager.update_task_status(task.id, TaskStatus.IN_PROGRESS, progress=5)
+
+        t0 = time.monotonic()
+        try:
+            response = await pm_agent.run(
+                user_message=user_message,
+                task_id=task.id,
+                history=history,
+                model_override=model,
+            )
+            duration = time.monotonic() - t0
+            await task_manager.complete_task(task.id, cost=cost_tracker.total_cost)
+            await memory.save_message(user_id, "assistant", response, model=model)
+            asyncio.create_task(reflection_engine.analyze_task(
+                user_id=user_id,
+                task_id=task.id,
+                task_type=TaskType.WEB_DEV.value,
+                user_message=user_message,
+                outcome=response,
+                success=True,
+                cost=cost_tracker.get_task_cost(task.id),
+                duration_seconds=duration,
+            ))
+            return response
+        except Exception as exc:
+            duration = time.monotonic() - t0
+            log.error(f"PM sync task #{task.id} failed: {exc}", exc_info=True)
+            await task_manager.fail_task(task.id, str(exc))
+            asyncio.create_task(reflection_engine.analyze_task(
+                user_id=user_id,
+                task_id=task.id,
+                task_type=TaskType.WEB_DEV.value,
+                user_message=user_message,
+                outcome=str(exc),
+                success=False,
+                cost=cost_tracker.get_task_cost(task.id),
+                duration_seconds=duration,
+            ))
+            return f"❌ Errore PM: {str(exc)[:500]}"
+
     # ── WebDev task (called after Q&A planning completes) ────────────
 
     async def handle_webdev_task(

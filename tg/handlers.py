@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 import re
@@ -70,6 +70,44 @@ async def _reply_html_safe(message_obj, text: str):
             await message_obj.reply_text(chunk, parse_mode="HTML")
         except Exception:
             await message_obj.reply_text(chunk)
+
+
+def _pm_session_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Cambia progetto", callback_data="pm:change_project"),
+            InlineKeyboardButton("🛑 Termina sessione", callback_data="pm:end_session"),
+        ]
+    ])
+
+
+def _sanitize_pm_reply(text: str) -> str:
+    """Keep PM replies readable in Telegram by stripping large code blocks."""
+    if not text:
+        return text
+
+    text = re.sub(r"```[\s\S]*?```", "[snippet di codice omesso]", text)
+    text = re.sub(r"<pre>[\s\S]*?</pre>", "[snippet di codice omesso]", text)
+    if len(text) > 3000:
+        text = text[:3000].rstrip() + "\n\n[risposta abbreviata per leggibilita']"
+    return text
+
+
+async def _start_project_selection(update: Update, user_id: int, pending_message: str) -> None:
+    """Open project selector menu for PM 'change project' action."""
+    from core.project_registry import project_registry
+    from core.project_selector import start_selector
+
+    all_projects = await project_registry.list_projects(limit=30)
+    active_projects = [p for p in all_projects if p.status in ("active", "building")]
+    if not active_projects:
+        await update.effective_message.reply_text(
+            "Nessun progetto esistente trovato. Scrivimi la richiesta e partiamo con un nuovo progetto.",
+        )
+        return
+
+    selector = start_selector(user_id, active_projects, pending_message)
+    await update.effective_message.reply_text(selector.format_menu(), parse_mode="HTML")
 
 
 # ── Commands ─────────────────────────────────────────────────────────────
@@ -272,6 +310,46 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
+    # ── PM session intercept (sticky routing) ─────────────────────────────
+    from core.pm_session import end_pm_session, get_pm_session
+    pm_session = get_pm_session(user_id)
+    if pm_session:
+        t = text.strip().lower()
+        if t in ("/pm_exit", "/exit", "esci", "termina sessione", "chiudi sessione"):
+            end_pm_session(user_id)
+            await update.message.reply_text("🛑 Sessione PM terminata.")
+            return
+
+        if t in ("cambia progetto", "/cambia_progetto", "/change_project"):
+            end_pm_session(user_id)
+            await _start_project_selection(update, user_id, pending_message="Modifica progetto esistente")
+            return
+
+        await update.message.chat.send_action("typing")
+        pm_session.add_user(text)
+        pm_response = await _orchestrator.handle_project_modification_sync(
+            user_id=user_id,
+            project=pm_session.project,
+            user_message=text,
+            chat_id=update.effective_chat.id,
+            history=pm_session.history,
+        )
+        pm_response = _sanitize_pm_reply(md_bold_to_html(pm_response))
+        pm_session.add_assistant(pm_response)
+        try:
+            await update.message.reply_text(
+                pm_response,
+                parse_mode="HTML",
+                reply_markup=_pm_session_keyboard(),
+            )
+        except Exception:
+            await update.message.reply_text(
+                re.sub(r"<[^>]+>", "", pm_response),
+                reply_markup=_pm_session_keyboard(),
+            )
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
     # ── Planning session intercept ────────────────────────────────────────
     from core.webdev_planner import get_session, abort_session
     session = get_session(user_id)
@@ -326,20 +404,20 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
             )
         else:
-            # Existing project → PM agent
-            await update.message.reply_text(
-                f"🧑‍💼 <b>PM Agent: {result.name}</b>\n"
-                f"Prendo in carico la richiesta…",
-                parse_mode="HTML",
+            # Existing project → start sticky PM session
+            from core.pm_session import start_pm_session
+            start_pm_session(
+                user_id=user_id,
+                project=result,
+                chat_id=update.effective_chat.id,
             )
-            await update.message.chat.send_action("typing")
-            if _orchestrator:
-                await _orchestrator.handle_project_modification(
-                    user_id=user_id,
-                    project=result,
-                    user_message=selector.pending_message,
-                    chat_id=update.effective_chat.id,
-                )
+            await update.message.reply_text(
+                f"🧑‍💼 <b>Sessione PM attiva</b> — progetto <b>{result.name}</b>\n"
+                "Dimmi ora che azione vuoi fare (es. aggiornare hero, cambiare copy, deploy, fix bug).\n\n"
+                f"Richiesta iniziale rilevata: <i>{selector.pending_message[:180]}</i>",
+                parse_mode="HTML",
+                reply_markup=_pm_session_keyboard(),
+            )
         return
     # ─────────────────────────────────────────────────────────────────────
 
@@ -459,6 +537,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/jobs — lista job schedulati\n"
         "/job_enable &lt;nome&gt; — abilita job\n"
         "/job_disable &lt;nome&gt; — disabilita job\n"
+        "/pm_exit — termina la sessione PM attiva\n"
         "/help — questo messaggio\n\n"
         "Oppure scrivi qualsiasi richiesta in linguaggio naturale!",
         parse_mode="HTML",
@@ -474,7 +553,25 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer("Non autorizzato.")
         return
 
-    data = query.data  # "approve:123" or "reject:123"
+    data = query.data or ""
+
+    if data == "pm:end_session":
+        from core.pm_session import end_pm_session
+        end_pm_session(update.effective_user.id)
+        await query.answer("Sessione PM terminata")
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text("🛑 Sessione PM terminata. Scrivimi pure una nuova richiesta.")
+        return
+
+    if data == "pm:change_project":
+        from core.pm_session import end_pm_session
+        end_pm_session(update.effective_user.id)
+        await query.answer("Cambio progetto")
+        await query.edit_message_reply_markup(reply_markup=None)
+        await _start_project_selection(update, update.effective_user.id, pending_message="Modifica progetto esistente")
+        return
+
+    # approval callbacks: "approve:123" / "reject:123"
     parts = data.split(":")
     if len(parts) != 2:
         await query.answer("Formato non valido.")

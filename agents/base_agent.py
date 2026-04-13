@@ -8,7 +8,7 @@ from typing import Any
 
 from core.openrouter_client import openrouter
 from core.model_router import TaskType, get_model_for_task
-from core.execution_controller import execution_controller, MAX_STEPS, MAX_TOKENS_PER_TASK
+from core.execution_controller import execution_controller, MAX_TOKENS_PER_TASK
 from core.context_compressor import compress_messages
 from core.task_manager import task_manager
 from config import config
@@ -34,6 +34,7 @@ class BaseAgent:
     description: str = ""
     default_task_type: TaskType = TaskType.TOOL_EXECUTION
     max_iterations: int | None = 15
+    max_steps_per_task: int | None = None
     max_continuations: int = MAX_CONTINUATIONS
     max_same_tool_calls: int = MAX_SAME_TOOL_CALLS
     loop_approval_threshold: int = MAX_SAME_TOOL_CALLS
@@ -170,7 +171,8 @@ class BaseAgent:
 
         # ── Execution controller state for this run ──────────────────
         exec_state = execution_controller.get(task_id)
-        _effective_max_steps = config.max_steps_per_task  # default 8, overridable
+        run_start_steps = exec_state.steps
+        _effective_max_steps = self.max_steps_per_task or config.max_steps_per_task
 
         iteration = 0
         while True:
@@ -220,7 +222,10 @@ class BaseAgent:
             # ── Execution controller guards ─────────────────────────────
 
             # Hard step limit (MAX_STEPS from config, default 8)
-            if not self.ask_approval_on_iteration_limit and exec_state.is_step_limit_reached():
+            if not self.ask_approval_on_iteration_limit and exec_state.is_step_limit_reached(
+                max_steps=_effective_max_steps,
+                start_steps=run_start_steps,
+            ):
                 log.warning(f"[{self.name}] Task #{task_id} reached MAX_STEPS ({_effective_max_steps})")
                 await notify(
                     f"⚠️ Task #{task_id} (<b>{self.name}</b>): step limit reached ({exec_state.steps}). Stopping."
