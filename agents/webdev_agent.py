@@ -18,6 +18,18 @@ from utils.logging import setup_logging
 
 log = setup_logging("webdev_agent")
 
+_WEB_STACK_POLICY = """\
+Policy versioni web moderne e compatibili:
+- Default preferito per nuovi siti: Node.js 22 LTS.
+- Se usi Next.js moderno, preferisci stack coerente tipo: Next.js 15.x + React 19.x + React DOM 19.x + TypeScript 5.x.
+- Se usi Tailwind CSS 4, il setup del progetto, PostCSS e i file CSS devono essere compatibili con Tailwind 4. Non mischiare config o sintassi di Tailwind 3 se hai scelto Tailwind 4.
+- Se scegli una versione precedente di un framework per stabilita', adatta anche il codice scritto a QUELLA versione. Non usare API, convenzioni o sintassi di release piu' recenti.
+- Package manager: preferisci npm recente stabile coerente con Node 22; dichiara sempre `engines.node` in package.json.
+- Per progetti Node/Next crea SEMPRE anche `.nvmrc` con la major Node scelta.
+- Evita stack vecchi senza motivo: niente Node 16/18, niente Next 13/14, niente React 17/18 per nuovi progetti salvo vincoli espliciti.
+- Prima di chiudere il lavoro, verifica la coerenza tra: package.json, lockfile, `.nvmrc`, framework scelto, API usate nel codice, config Tailwind/PostCSS/Next/TypeScript.
+"""
+
 # ── System prompts per ruolo ───────────────────────────────────────────────────
 
 _PLANNER_PROMPT = """\
@@ -37,6 +49,8 @@ Analizza la richiesta dell'utente e restituisci SOLO un oggetto JSON valido con 
 
 Non scrivere nulla fuori dal JSON. Sii preciso sui file da creare."""
 
+_PLANNER_PROMPT += "\n\n" + _WEB_STACK_POLICY + "\nNel campo tech_stack indica uno stack coerente e recente, non generico."
+
 _BUILDER_PROMPT = """\
 Sei un Senior Full-Stack Developer. Riceverai un piano architetturale e devi implementarlo completamente.
 
@@ -53,6 +67,7 @@ Regole:
 - Il sito deve sembrare fatto da un'agenzia top (Awwwards-level), non un template generico
 - Implementa animazioni e micro-interazioni come indicato nel design system
 - Mobile-first responsive OBBLIGATORIO in ogni file CSS/JSX
+- Inserisci in package.json versioni coerenti con il codice generato, non solo "recenti" in astratto
 
 Workflow:
 1. Crea la workspace directory
@@ -63,6 +78,8 @@ Workflow:
 3. Scrivi ogni file indicato nel piano con versioni aggiornate
 4. Applica il design system a tutti i componenti visivi
 5. Conferma quando hai finito, includendo le versioni scelte"""
+
+_BUILDER_PROMPT += "\n\n" + _WEB_STACK_POLICY + "\nSe scrivi package.json devi includere anche `engines.node` e creare `.nvmrc`."
 
 _REVIEWER_PROMPT = """\
 Sei un Senior Code Reviewer. Riceverai il codice generato da un developer e devi:
@@ -76,6 +93,8 @@ Sei un Senior Code Reviewer. Riceverai il codice generato da un developer e devi
 
 Concentrati su problemi reali, non su preferenze stilistiche.
 Rispondi in italiano."""
+
+_REVIEWER_PROMPT += "\n\n" + _WEB_STACK_POLICY + "\nSe trovi mismatch tra framework/runtime/codice, correggili direttamente."
 
 _DEPLOYER_PROMPT = """\
 Sei un DevOps Engineer. Il tuo compito è pubblicare il progetto:
@@ -223,13 +242,13 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             plan = json.loads(js)
             # Merge specs data into plan
             plan.setdefault("project_name", specs.get("project_name", "progetto-web"))
-            plan.setdefault("tech_stack", specs.get("tech_stack", "Next.js 15 + Tailwind CSS 4"))
+            plan.setdefault("tech_stack", specs.get("tech_stack", "Next.js 15 + React 19 + Tailwind CSS 4 + TypeScript 5 + Node 22 LTS"))
             return plan
         except (json.JSONDecodeError, ValueError):
             log.warning(f"[webdev] _specs_to_file_plan non JSON: {plan_raw[:200]}")
             return {
                 "project_name": specs.get("project_name", "progetto-web"),
-                "tech_stack": specs.get("tech_stack", "Next.js 15 + Tailwind CSS 4"),
+                "tech_stack": specs.get("tech_stack", "Next.js 15 + React 19 + Tailwind CSS 4 + TypeScript 5 + Node 22 LTS"),
                 "description": specs.get("description", ""),
                 "files": [],
             }
@@ -368,6 +387,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
                 f"Data corrente: 2026-04-08\n"
                 f"Prima di scrivere package.json o requirements, verifica le versioni correnti "
                 f"via `npm view <pkg> version` o browser.\n"
+                f"{_WEB_STACK_POLICY}\n"
                 f"{specs_context}"
                 f"{design_system_section}"
             )
@@ -422,7 +442,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
                 plan: dict = json.loads(plan_raw[json_start:json_end])
             except (json.JSONDecodeError, ValueError):
                 log.warning(f"[webdev] Planner non JSON: {plan_raw[:200]}")
-                plan = {"project_name": "progetto-web", "tech_stack": "Next.js 15 + Tailwind CSS 4", "files": []}
+                plan = {"project_name": "progetto-web", "tech_stack": "Next.js 15 + React 19 + Tailwind CSS 4 + TypeScript 5 + Node 22 LTS", "files": []}
 
         project_name = plan.get("project_name", "progetto-web")
         tech_stack = plan.get("tech_stack", "")
@@ -481,7 +501,8 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             f"Directory: {workdir}\n"
             f"File attesi: {json.dumps([f['path'] for f in plan.get('files', [])], ensure_ascii=False)}\n\n"
             f"Controlla esplicitamente package.json, lockfile e requirements.* contro versioni correnti. "
-            f"Aggiorna dipendenze obsolete a release stabili recenti e poi restituisci un report."
+            f"Aggiorna dipendenze obsolete a release stabili recenti e poi restituisci un report.\n"
+            f"{_WEB_STACK_POLICY}"
         )
 
         review_result = await self._run_phase(

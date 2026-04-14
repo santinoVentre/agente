@@ -136,6 +136,12 @@ _SPECS_PROMPT = """\
 Sei un web architect senior. Date le risposte di un cliente durante una sessione di discovery,
 genera le specifiche complete del progetto web.
 
+Regole stack/versioni:
+- Per nuovi progetti preferisci uno stack moderno e coerente: Next.js 15.x + React 19.x + Tailwind CSS 4 + TypeScript 5.x + Node.js 22 LTS.
+- Non proporre Node o framework vecchi senza un vincolo esplicito del cliente.
+- Se proponi Tailwind 4, il progetto deve essere configurato in modo compatibile con Tailwind 4.
+- Il campo `tech_stack` deve essere concreto e compatibile, non generico.
+
 Restituisci SOLO un oggetto JSON valido con questa struttura esatta:
 {
   "project_name": "nome-kebab-case",
@@ -143,7 +149,7 @@ Restituisci SOLO un oggetto JSON valido con questa struttura esatta:
   "description": "cosa fa il sito in 2-3 frasi",
   "purpose": "obiettivo principale del sito",
   "target_audience": "chi sono i visitatori",
-  "tech_stack": "es. Next.js 15 + Tailwind CSS 4 + Framer Motion",
+    "tech_stack": "es. Next.js 15 + React 19 + Tailwind CSS 4 + TypeScript 5 + Node 22 LTS + Framer Motion",
   "pages": [
     {
       "name": "Home",
@@ -403,7 +409,7 @@ async def _generate_specs(initial_message: str, answers: dict) -> dict:
         return {
             "project_name": "progetto-web",
             "description": initial_message,
-            "tech_stack": "Next.js 15 + Tailwind CSS 4",
+            "tech_stack": "Next.js 15 + React 19 + Tailwind CSS 4 + TypeScript 5 + Node 22 LTS",
             "pages": [{"name": "Home", "slug": "/", "sections": ["hero", "cta"]}],
         }
 
