@@ -88,6 +88,22 @@ def _sanitize_pm_reply(text: str) -> str:
 
     text = re.sub(r"```[\s\S]*?```", "[snippet di codice omesso]", text)
     text = re.sub(r"<pre>[\s\S]*?</pre>", "[snippet di codice omesso]", text)
+    suspicious_patterns = [
+        r"## Regole operative",
+        r"## Contesto operativo",
+        r"Tool disponibili:",
+        r"calls>",
+        r"<tool>",
+        r"name>",
+        r"parameter name=",
+        r"PM_CONTEXT",
+    ]
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in suspicious_patterns):
+        return (
+            "Ho generato un output interno non adatto alla chat, quindi lo blocco qui.\n\n"
+            "Non considero confermati push o deploy finché non arrivano da tool reali. "
+            "Se vuoi, posso verificare ora lo stato reale del progetto su GitHub e Vercel."
+        )
     if len(text) > 3000:
         text = text[:3000].rstrip() + "\n\n[risposta abbreviata per leggibilita']"
     return text
