@@ -514,14 +514,23 @@ class Orchestrator:
                 if project_name:
                     pm_ctx = (state_files or {}).get("pm_context", "")
                     workdir = f"/srv/agent/workspaces/{project_name}"
+                    github_match = re.search(r"<b>GitHub verificato:</b>\s*(https?://\S+|NON verificato.*?)($|\n)", response)
+                    deploy_match = re.search(r"<b>Vercel verificato:</b>\s*(https?://\S+|NON verificato.*?)($|\n)", response)
+                    verified_match = re.search(r"<b>Deploy verificato:</b>\s*(SI|NO)", response)
+                    github_url = github_match.group(1).strip() if github_match else ""
+                    deploy_url = deploy_match.group(1).strip() if deploy_match else ""
+                    deploy_verified = (verified_match.group(1) == "SI") if verified_match else False
                     try:
                         await project_registry.upsert_project(
                             name=project_name,
                             description=specs.get("description", "")[:500],
                             workspace_path=workdir,
+                            github_repo=(f"{config.github_owner}/{project_name}" if github_url.startswith("http") else None),
+                            deploy_url=deploy_url if deploy_url.startswith("http") else None,
                             deploy_provider="vercel",
                             status="active",
                             metadata_json={"pm_context": pm_ctx[:8000]} if pm_ctx else None,
+                            mark_deployed=deploy_verified,
                         )
                         log.info(f"[orchestrator] Project '{project_name}' registered in registry")
                     except Exception as reg_exc:

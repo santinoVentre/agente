@@ -135,6 +135,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 <b>Agent Infrastructure Online</b>\n"
         "Mandami qualsiasi richiesta e ci penso io.\n\n"
+        "/websites — scegli un sito da creare o modificare\n"
         "/status — stato agenti e task\n"
         "/tasks — lista task attivi\n"
         "/costs — riepilogo costi API\n"
@@ -202,6 +203,36 @@ async def cmd_projects(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"  deploy: <code>{r.deploy_url or '-'}</code>"
         )
     await _reply_html_safe(update.message, "\n".join(lines))
+
+
+async def cmd_websites(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Open the website selector flow for modifying or creating websites."""
+    if not _is_authorized(update):
+        return
+
+    user_id = update.effective_user.id
+    from core.pm_session import end_pm_session
+    from core.project_registry import project_registry
+    from core.webdev_planner import PLANNING_QUESTIONS, start_session
+
+    end_pm_session(user_id)
+    rows = await project_registry.list_projects(limit=30)
+    active_projects = [p for p in rows if p.status in ("active", "building")]
+
+    if active_projects:
+        await _start_project_selection(update, user_id, pending_message="Gestione sito web")
+        return
+
+    ws = start_session(user_id, "Crea un nuovo sito web")
+    q = ws.current_question
+    total = len(PLANNING_QUESTIONS)
+    await update.message.reply_text(
+        f"🌐 <b>Nessun sito registrato: partiamo da zero.</b>\n\n"
+        f"Ti farò <b>{total} domande rapide</b> per creare il nuovo sito.\n\n"
+        f"{ws.progress_bar()}\n\n"
+        f"{q['question']}",
+        parse_mode="HTML",
+    )
 
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -545,6 +576,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/budget — mostra budget (o /budget task|daily X)\n"
         "/tools — lista tool disponibili\n"
         "/projects — lista progetti registrati\n"
+        "/websites — selettore siti web (crea/modifica)\n"
         "/cancel &lt;id&gt; — annulla un task\n"
         "/cancel_all — cancella tutti i task attivi/bloccati\n"
         "/force_cancel &lt;id&gt; — forza cancellazione task bloccato\n"

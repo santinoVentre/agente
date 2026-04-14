@@ -7,6 +7,7 @@ import json
 from config import config
 from core.model_router import TaskType, get_model_for_task
 from core.openrouter_client import openrouter
+from core.project_registry import project_registry
 from core.task_manager import task_manager
 from core.webdev_planner import build_design_system_prompt_section
 from db.models import TaskStatus
@@ -84,7 +85,7 @@ Sei un DevOps Engineer. Il tuo compito è pubblicare il progetto:
 3. Pusha TUTTA la workspace con una sola chiamata `github(action=push_directory, source_dir=...)`
 4. Crea o riusa il progetto Vercel con `vercel(action=deploy_from_github)`
 5. Verifica che esista una deployment reale e restituisci l'URL effettivo
-4. Restituisci l'URL pubblico del sito
+6. Restituisci l'URL pubblico del sito
 
 Se GitHub push o Vercel deploy falliscono, spiega il motivo reale ricevuto dal tool e NON dichiarare successo.
 Usa i tool github e vercel disponibili. Rispondi in italiano."""
@@ -102,6 +103,84 @@ class WebDevAgent(BaseAgent):
     ask_approval_on_loop = True
 
     # ── Pipeline helpers ───────────────────────────────────────────────────────
+
+    async def _verify_publish(self, project_name: str, task_id: int) -> dict:
+        """Verify GitHub repo and Vercel deployment with real tool calls."""
+        github_result = await self.execute_tool(
+            "github",
+            {"action": "get_repo", "repo_name": project_name},
+            task_id,
+        )
+        vercel_project = await self.execute_tool(
+            "vercel",
+            {"action": "get_project", "project_name": project_name},
+            task_id,
+        )
+        vercel_deployments = await self.execute_tool(
+            "vercel",
+            {"action": "list_deployments", "project_name": project_name},
+            task_id,
+        )
+
+        repo_url = ""
+        github_repo_ref = ""
+        if github_result.get("success"):
+            repo = github_result.get("repo", {})
+            repo_url = repo.get("html_url", "")
+            full_name = repo.get("full_name", "")
+            github_repo_ref = full_name or (f"{config.github_owner}/{project_name}" if repo_url else "")
+
+        project_exists = vercel_project.get("success", False)
+        deployments = vercel_deployments.get("deployments", []) if vercel_deployments.get("success") else []
+        ready_deployment = None
+        latest_deployment = deployments[0] if deployments else None
+        for deployment in deployments:
+            state = str(deployment.get("state", "")).lower()
+            if state == "ready":
+                ready_deployment = deployment
+                break
+
+        chosen_deployment = ready_deployment or latest_deployment
+        deploy_url = ""
+        deploy_state = "missing"
+        if chosen_deployment and chosen_deployment.get("url"):
+            deploy_url = f"https://{chosen_deployment['url']}"
+            deploy_state = str(chosen_deployment.get("state", "unknown")).lower()
+
+        verified = bool(repo_url and ready_deployment and project_exists)
+        return {
+            "verified": verified,
+            "github_repo": github_repo_ref,
+            "repo_url": repo_url,
+            "vercel_project_exists": project_exists,
+            "deploy_url": deploy_url,
+            "deploy_state": deploy_state,
+            "github_error": github_result.get("error", "") if not github_result.get("success") else "",
+            "vercel_error": (
+                vercel_project.get("error", "") or vercel_deployments.get("error", "")
+            ) if not verified else "",
+        }
+
+    async def _persist_project_status(
+        self,
+        project_name: str,
+        description: str,
+        workdir: str,
+        state_files: dict,
+        verification: dict,
+    ) -> None:
+        pm_ctx = state_files.get("pm_context", "")
+        await project_registry.upsert_project(
+            name=project_name,
+            description=description[:500],
+            workspace_path=workdir,
+            github_repo=verification.get("github_repo") or None,
+            deploy_provider="vercel",
+            deploy_url=verification.get("deploy_url") or None,
+            status="active",
+            metadata_json={"pm_context": pm_ctx[:8000]} if pm_ctx else None,
+            mark_deployed=bool(verification.get("verified")),
+        )
 
     async def _specs_to_file_plan(self, specs: dict, task_id: int) -> dict:
         """Convert Q&A specs into a detailed file plan via LLM."""
@@ -434,14 +513,32 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             progress=80,
         )
 
+        verification = await self._verify_publish(project_name, task_id)
+        await self._persist_project_status(
+            project_name=project_name,
+            description=plan.get("description", ""),
+            workdir=workdir,
+            state_files=state_files or {},
+            verification=verification,
+        )
+
         await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=100)
 
         # ── REPORT FINALE ────────────────────────────────────────────────────
         task_cost = cost_tracker.get_task_cost(task_id)
+        github_status = verification.get("repo_url") or f"NON verificato ({verification.get('github_error') or 'repo non trovato'})"
+        deploy_status = verification.get("deploy_url") or (
+            f"NON verificato ({verification.get('vercel_error') or 'deployment ready non trovata'})"
+        )
+        deploy_verification_label = "SI" if verification.get("verified") else "NO"
         return (
             f"✅ <b>Progetto completato: {project_name}</b>\n\n"
             f"🛠️ Stack: {tech_stack}\n\n"
             f"<b>Review:</b>\n{review_result[:800]}\n\n"
             f"<b>Deploy:</b>\n{deploy_result[:800]}\n\n"
+            f"<b>Deploy verificato:</b> {deploy_verification_label}\n"
+            f"<b>GitHub verificato:</b> {github_status}\n"
+            f"<b>Vercel verificato:</b> {deploy_status}\n"
+            f"<b>Stato deployment:</b> {verification.get('deploy_state', 'missing')}\n\n"
             f"💰 Costo totale task: ${task_cost:.3f}"
         )

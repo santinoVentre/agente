@@ -22,6 +22,7 @@ from tg.handlers import (
     cmd_tasks,
     cmd_tools,
     cmd_projects,
+    cmd_websites,
     cmd_logs,
     cmd_log,
     cmd_jobs,
@@ -57,6 +58,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("costs", cmd_costs))
     app.add_handler(CommandHandler("tools", cmd_tools))
     app.add_handler(CommandHandler("projects", cmd_projects))
+    app.add_handler(CommandHandler("websites", cmd_websites))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("cancel_all", cmd_cancel_all))
     app.add_handler(CommandHandler("force_cancel", cmd_force_cancel))
