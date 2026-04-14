@@ -59,6 +59,7 @@ class Config:
     model_cheap: str = field(default_factory=lambda: _env("MODEL_ROUTING_CHEAP", "google/gemini-2.0-flash-001"))
     # MID    — reasoning, planning, validation, code generation (PRIMARY for websites)
     model_mid: str = field(default_factory=lambda: _env("MODEL_ROUTING_MID", "anthropic/claude-sonnet-4-5"))
+    model_mid_fallback: str = field(default_factory=lambda: _env("MODEL_ROUTING_MID_FALLBACK", ""))
     # EXPENSIVE — last resort: task fails multiple times / extreme complexity
     model_expensive: str = field(default_factory=lambda: _env("MODEL_ROUTING_EXPENSIVE", "anthropic/claude-opus-4-5"))
     # Legacy / specialised overrides (env-configurable)
@@ -118,6 +119,7 @@ class Config:
             "--- Model routing ---",
             f"MODEL_ROUTING_CHEAP={self.model_cheap}",
             f"MODEL_ROUTING_MID={self.model_mid}",
+            f"MODEL_ROUTING_MID_FALLBACK={self.model_mid_fallback or '(not set)'}",
             f"MODEL_ROUTING_EXPENSIVE={self.model_expensive}",
             f"MODEL_AUTONOMOUS={self.model_autonomous}",
             f"MODEL_CODE_GENERATION={self.model_code_generation}",

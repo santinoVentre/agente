@@ -62,8 +62,65 @@ class OpenRouterClient:
             payload["tool_choice"] = tool_choice
 
         resp = await self._request_with_retry(client, payload)
-        await self._track_cost(model, resp, task_id)
+        actual_model = resp.get("_agent_model_used", model)
+        await self._track_cost(actual_model, resp, task_id)
         return resp
+
+    def _get_mid_fallback_model(self, model: str) -> str | None:
+        fallback = (config.model_mid_fallback or "").strip()
+        if not fallback:
+            return None
+        if model != config.model_mid:
+            return None
+        if fallback == model:
+            return None
+        return fallback
+
+    def _should_try_mid_fallback(self, error: Exception) -> bool:
+        if isinstance(error, json.JSONDecodeError):
+            return True
+        if isinstance(error, httpx.HTTPStatusError):
+            status = error.response.status_code
+            return status in (400, 404, 422)
+        if isinstance(error, httpx.RequestError):
+            return True
+        return False
+
+    async def _post_and_parse(self, client: httpx.AsyncClient, payload: dict[str, Any]) -> dict[str, Any]:
+        resp = await client.post("/chat/completions", json=payload)
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as exc:
+            body_preview = resp.text[:1200]
+            log.warning(
+                "OpenRouter returned non-JSON body for model %s: %s",
+                payload.get("model"),
+                body_preview,
+            )
+            raise exc
+        data["_agent_model_used"] = payload.get("model")
+        return data
+
+    async def _request_once(self, client: httpx.AsyncClient, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await self._post_and_parse(client, payload)
+        except (httpx.HTTPStatusError, httpx.RequestError, json.JSONDecodeError) as primary_error:
+            fallback_model = self._get_mid_fallback_model(str(payload.get("model", "")))
+            if not fallback_model or not self._should_try_mid_fallback(primary_error):
+                raise
+
+            fallback_payload = dict(payload)
+            fallback_payload["model"] = fallback_model
+            log.warning(
+                "OpenRouter MID fallback triggered: %s -> %s due to %s",
+                payload.get("model"),
+                fallback_model,
+                primary_error,
+            )
+            data = await self._post_and_parse(client, fallback_payload)
+            data["_agent_model_fallback_from"] = payload.get("model")
+            return data
 
     async def chat_stream(
         self,
@@ -105,10 +162,8 @@ class OpenRouterClient:
         last_err: Exception | None = None
         for attempt in range(max_retries):
             try:
-                resp = await client.post("/chat/completions", json=payload)
-                resp.raise_for_status()
-                return resp.json()
-            except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                return await self._request_once(client, payload)
+            except (httpx.HTTPStatusError, httpx.RequestError, json.JSONDecodeError) as e:
                 last_err = e
                 log.warning(f"OpenRouter request failed (attempt {attempt+1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
