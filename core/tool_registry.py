@@ -18,6 +18,9 @@ from utils.logging import setup_logging
 
 log = setup_logging("tool_registry")
 
+# Custom tools must reside inside this directory — enforced before any exec_module call
+_CUSTOM_TOOLS_ROOT = (Path(__file__).parent.parent / "tools" / "custom").resolve()
+
 
 class ToolRegistryManager:
     """Manages discovery, registration, and hot-loading of tools."""
@@ -118,6 +121,31 @@ class ToolRegistryManager:
         path = Path(entry.source_path)
         if not path.exists():
             log.error(f"Custom tool source not found: {path}")
+            return None
+
+        # Security: reject any path that escapes the allowed custom tools directory
+        try:
+            resolved_path = path.resolve()
+            resolved_path.relative_to(_CUSTOM_TOOLS_ROOT)
+        except ValueError:
+            log.error(
+                f"Custom tool '{name}' path '{path}' is outside allowed directory "
+                f"'{_CUSTOM_TOOLS_ROOT}' — load refused"
+            )
+            return None
+
+        # Validate generated code before executing it
+        try:
+            source_code = path.read_text(encoding="utf-8")
+            from agents.security_agent import security_agent
+            is_safe, issues = security_agent.validate_generated_code(source_code)
+            if not is_safe:
+                log.error(
+                    f"Custom tool '{name}' failed code validation: {issues} — load refused"
+                )
+                return None
+        except OSError as exc:
+            log.error(f"Cannot read custom tool source '{path}': {exc}")
             return None
 
         try:

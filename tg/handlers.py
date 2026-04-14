@@ -10,6 +10,7 @@ from telegram.ext import ContextTypes
 
 import re
 from config import config
+from tg.notifications import notify
 from utils.logging import setup_logging
 from utils.cost_tracker import cost_tracker
 from pathlib import Path
@@ -757,6 +758,12 @@ async def request_approval(task_id: int, timeout: float = 300.0) -> bool:
         return await asyncio.wait_for(future, timeout=timeout)
     except asyncio.TimeoutError:
         _pending_approvals.pop(task_id, None)
+        await notify(
+            f"⏰ <b>Approvazione scaduta</b> (task #{task_id})\n"
+            f"Nessuna risposta ricevuta entro {int(timeout)}s.\n"
+            "Il task è stato sospeso automaticamente. "
+            "Puoi riprendere inviando un nuovo messaggio."
+        )
         return False
 
 

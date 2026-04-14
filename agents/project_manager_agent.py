@@ -118,6 +118,14 @@ _PUBLISH_CLAIM_PATTERNS = [
     r"https://[^\s]+\.vercel\.app",
     r"https://vercel\.com/",
 ]
+_REMOVAL_CLAIM_PATTERNS = [
+    r"rimuov",
+    r"rimoss",
+    r"eliminat",
+    r"cancellat",
+    r"delete",
+    r"deleted",
+]
 
 
 class ProjectManagerAgent(BaseAgent):
@@ -196,6 +204,47 @@ class ProjectManagerAgent(BaseAgent):
             pm_context=pm_context,
         )
 
+    # ── Delete guard ──────────────────────────────────────────────────────────
+
+    # Actions that irreversibly remove project resources
+    _DELETE_ACTIONS = {"delete_repo", "delete_project", "delete"}
+
+    async def execute_tool(self, tool_name: str, parameters: dict, task_id: int | None = None):  # type: ignore[override]
+        """Wrap BaseAgent.execute_tool with a mandatory double-confirmation gate for
+        destructive delete operations on project resources."""
+        action = str(parameters.get("action", "")).lower()
+        is_delete = (
+            action in self._DELETE_ACTIONS
+            and tool_name in ("github", "vercel", "filesystem", "project_registry")
+        )
+        if is_delete:
+            resource_label = parameters.get("repo_name") or parameters.get("project_name") or parameters.get("path") or parameters.get("name") or "risorsa sconosciuta"
+            # First confirmation: request approval
+            first_approved = await self._request_user_approval(
+                task_id or 0,
+                f"⚠️ <b>Conferma eliminazione</b>\n\n"
+                f"Stai per eliminare: <code>{resource_label}</code>\n"
+                f"Tool: <b>{tool_name}</b> — azione: <b>{action}</b>\n\n"
+                f"Questa operazione è <b>irreversibile</b>.\n"
+                f"Confermi la prima volta?",
+                timeout=300.0,
+            )
+            if not first_approved:
+                return {"success": False, "error": "Eliminazione annullata dall'utente (prima conferma).", "failure_kind": "approval_rejected"}
+
+            # Second confirmation: double-check
+            second_approved = await self._request_user_approval(
+                task_id or 0,
+                f"🔴 <b>ULTIMA CONFERMA — Eliminazione definitiva</b>\n\n"
+                f"Risorsa: <code>{resource_label}</code>\n"
+                f"Sei assolutamente sicuro? Scrivi <b>Sì</b> per procedere.",
+                timeout=300.0,
+            )
+            if not second_approved:
+                return {"success": False, "error": "Eliminazione annullata dall'utente (seconda conferma).", "failure_kind": "approval_rejected"}
+
+        return await super().execute_tool(tool_name, parameters, task_id)
+
     # ── System prompt ─────────────────────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
@@ -223,6 +272,99 @@ class ProjectManagerAgent(BaseAgent):
 
     def _contains_publish_claims(self, text: str) -> bool:
         return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _PUBLISH_CLAIM_PATTERNS)
+
+    def _contains_removal_claims(self, text: str) -> bool:
+        return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _REMOVAL_CLAIM_PATTERNS)
+
+    async def _verify_project_removal(self, task_id: int) -> dict[str, str | bool]:
+        registry_result = await self.execute_tool(
+            "project_registry",
+            {"action": "get", "name": self.project_name},
+            task_id,
+        )
+        workspace_result = await self.execute_tool(
+            "filesystem",
+            {"action": "exists", "path": self.workdir},
+            task_id,
+        )
+        github_result = await self.execute_tool(
+            "github",
+            {"action": "get_repo", "repo_name": self.project_name},
+            task_id,
+        )
+        vercel_result = await self.execute_tool(
+            "vercel",
+            {"action": "get_project", "project_name": self.project_name},
+            task_id,
+        )
+
+        registry_project = registry_result.get("project", {}) if registry_result.get("success") else {}
+        registry_status = str(registry_project.get("status", "")).lower()
+        registry_removed = (not registry_result.get("success")) or registry_status == "deleted"
+        workspace_removed = not bool(workspace_result.get("exists"))
+
+        github_error = str(github_result.get("error", ""))
+        github_removed = (not github_result.get("success")) and (
+            "404" in github_error or "not found" in github_error.lower()
+        )
+
+        vercel_error = str(vercel_result.get("error", ""))
+        vercel_removed = (not vercel_result.get("success")) and (
+            "404" in vercel_error or "not found" in vercel_error.lower()
+        )
+
+        return {
+            "registry_removed": registry_removed,
+            "registry_status": registry_status or "missing",
+            "workspace_removed": workspace_removed,
+            "github_removed": github_removed,
+            "github_error": github_error,
+            "vercel_removed": vercel_removed,
+            "vercel_error": vercel_error,
+        }
+
+    async def _enforce_verified_removal_reply(self, task_id: int) -> str:
+        verification = await self._verify_project_removal(task_id)
+        checks = [
+            ("Registro progetto", bool(verification.get("registry_removed"))),
+            ("Workspace locale", bool(verification.get("workspace_removed"))),
+            ("Repository GitHub", bool(verification.get("github_removed"))),
+            ("Progetto Vercel", bool(verification.get("vercel_removed"))),
+        ]
+        problems: list[str] = []
+        if not verification.get("registry_removed"):
+            problems.append(
+                f"Registro progetto ancora presente (status={verification.get('registry_status') or 'unknown'})"
+            )
+        if not verification.get("workspace_removed"):
+            problems.append("Workspace locale ancora presente")
+        if not verification.get("github_removed"):
+            problems.append(
+                f"Repository GitHub non risulta rimosso ({verification.get('github_error') or 'repo ancora presente o verifica inconcludente'})"
+            )
+        if not verification.get("vercel_removed"):
+            problems.append(
+                f"Progetto Vercel non risulta rimosso ({verification.get('vercel_error') or 'progetto ancora presente o verifica inconcludente'})"
+            )
+
+        if not problems:
+            lines = [
+                f"Ho verificato la rimozione del progetto \"{self.project_name}\".",
+                "",
+                "- Registro progetto: rimosso o marcato deleted",
+                "- Workspace locale: assente",
+                "- Repository GitHub: assente",
+                "- Progetto Vercel: assente",
+                "",
+                "Il progetto risulta rimosso dal sistema.",
+            ]
+            return "\n".join(lines)
+
+        return (
+            f"La rimozione del progetto \"{self.project_name}\" e' solo parzialmente confermata.\n\n"
+            + "\n".join(f"- {problem}" for problem in problems)
+            + "\n\nSe vuoi, posso tentare una pulizia finale solo delle risorse residue."
+        )
 
     async def _verify_live_publish(self, task_id: int) -> dict[str, str | bool]:
         github_result = await self.execute_tool(
@@ -344,6 +486,8 @@ class ProjectManagerAgent(BaseAgent):
             )
         if self._contains_internal_output(text):
             return await self._rewrite_internal_output(text, task_id)
+        if self._contains_removal_claims(text):
+            return await self._enforce_verified_removal_reply(task_id)
         if self._contains_publish_claims(text):
             return await self._enforce_verified_publish_reply(text, task_id)
         return text

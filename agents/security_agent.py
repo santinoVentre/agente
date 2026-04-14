@@ -27,6 +27,19 @@ _SHELL_BLOCKLIST = [
     r"iptables\s+-F",
 ]
 
+# Whitelisted sudo commands — regex-anchored to prevent prefix-bypass attacks
+_SUDO_REGEX_WHITELIST: list[re.Pattern] = [
+    re.compile(r"^sudo\s+apt(?:-get)?\s+(update|install\s+-y)\b"),
+    re.compile(r"^sudo\s+systemctl\s+(reload|restart|start|stop|status)\s+\w"),
+    # cp only from /tmp/agent-<safe-name> to specific nginx paths
+    re.compile(r"^sudo\s+cp\s+/tmp/agent-[\w.-]+\s+/etc/nginx/(?:sites-available|conf\.d)/[\w.-]+$"),
+    re.compile(r"^sudo\s+ln\s+-sf\s+/etc/nginx/sites-available/[\w.-]+\s+/etc/nginx/sites-enabled/[\w.-]+$"),
+    re.compile(r"^sudo\s+rm\s+/etc/nginx/sites-enabled/[\w.-]+$"),
+    re.compile(r"^sudo\s+certbot\b"),
+    re.compile(r"^sudo\s+nginx\s+-t$"),
+    re.compile(r"^sudo\s+ufw\s+(allow|deny|status|enable)\b"),
+]
+
 # Imports that are forbidden in generated tool code
 _FORBIDDEN_IMPORTS = [
     "os.system",
@@ -154,19 +167,8 @@ class SecurityAgent:
             if path in cmd_lower:
                 return RiskLevel.CRITICAL, f"Access to protected system path: {path}"
 
-        # Whitelisted sudo commands — checked BEFORE generic destructive patterns so that
-        # explicitly allowed commands like "sudo rm /etc/nginx/sites-enabled/…" are not
-        # incorrectly escalated to HIGH.
-        _sudo_whitelist = [
-            "sudo apt update", "sudo apt install -y",
-            "sudo systemctl reload", "sudo systemctl restart", "sudo systemctl start",
-            "sudo systemctl stop", "sudo systemctl status",
-            "sudo cp /tmp/agent-", "sudo ln -sf",
-            "sudo rm /etc/nginx/sites-enabled/",
-            "sudo certbot", "sudo nginx -t",
-            "sudo ufw allow", "sudo ufw deny", "sudo ufw status", "sudo ufw enable",
-        ]
-        if any(cmd_lower.strip().startswith(w) or w in cmd_lower for w in _sudo_whitelist):
+        # Whitelisted sudo commands — regex-anchored to prevent prefix/suffix bypass
+        if any(p.search(cmd_lower.strip()) for p in _SUDO_REGEX_WHITELIST):
             return RiskLevel.MEDIUM, None
 
         # Self-management (agent restarting itself, installing in its own venv)

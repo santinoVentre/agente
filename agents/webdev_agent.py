@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 from config import config
 from core.model_router import TaskType, get_model_for_task
@@ -17,6 +19,35 @@ from utils.cost_tracker import cost_tracker
 from utils.logging import setup_logging
 
 log = setup_logging("webdev_agent")
+
+
+def _sanitize_project_name(name: str) -> str:
+    """Sanitize to safe kebab-case, preventing path traversal."""
+    sanitized = re.sub(r"[^a-z0-9-]", "-", name.lower().strip())
+    sanitized = re.sub(r"-{2,}", "-", sanitized).strip("-")
+    return sanitized or "progetto-web"
+
+
+def _validate_plan_paths(plan: dict, workdir: str) -> dict:
+    """Remove file paths from plan that escape the workdir (path traversal guard)."""
+    safe_files = []
+    workdir_resolved = str(Path(workdir).resolve())
+    for f in plan.get("files", []):
+        raw_path = f.get("path", "")
+        # Strip leading slashes so Path doesn't treat it as absolute
+        clean = Path(raw_path.lstrip("/")).as_posix()
+        try:
+            resolved = str((Path(workdir) / clean).resolve())
+            if resolved.startswith(workdir_resolved):
+                f["path"] = clean
+                safe_files.append(f)
+            else:
+                log.warning(f"[webdev] Dropped unsafe file path from plan: {raw_path!r}")
+        except Exception:
+            log.warning(f"[webdev] Could not validate path: {raw_path!r} — dropped")
+    plan["files"] = safe_files
+    return plan
+
 
 _WEB_STACK_POLICY = """\
 Policy versioni web moderne e compatibili:
@@ -402,6 +433,17 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             )
             results.append(f"[Wave {wave_num}] {result[:300]}")
 
+            # Abort pipeline early if this wave produced a hard stop
+            failure_indicators = ("stopped:", "mi sono fermato", "ho raggiunto il limite")
+            if result and any(ind in result.lower() for ind in failure_indicators):
+                log.warning(f"[webdev] Wave {wave_num} returned failure: {result[:200]}")
+                await notify(
+                    f"⚠️ <b>Wave {wave_num}/{total_waves}</b> non completata.\n"
+                    f"<code>{result[:300]}</code>\n\n"
+                    "Pipeline interrotta. Verifica il problema e riprova."
+                )
+                return "\n\n".join(results) + f"\n\n[ERRORE: Wave {wave_num} fallita — pipeline interrotta]"
+
         return "\n\n".join(results)
 
     # ── Main entry point ───────────────────────────────────────────────────────
@@ -444,9 +486,12 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
                 log.warning(f"[webdev] Planner non JSON: {plan_raw[:200]}")
                 plan = {"project_name": "progetto-web", "tech_stack": "Next.js 15 + React 19 + Tailwind CSS 4 + TypeScript 5 + Node 22 LTS", "files": []}
 
-        project_name = plan.get("project_name", "progetto-web")
+        project_name = _sanitize_project_name(plan.get("project_name", "progetto-web"))
+        plan["project_name"] = project_name  # keep consistent
         tech_stack = plan.get("tech_stack", "")
         workdir = f"/srv/agent/workspaces/{project_name}"
+        # Guard: remove any LLM-generated file paths that escape the workspace
+        plan = _validate_plan_paths(plan, workdir)
 
         await notify(
             f"✅ <b>Piano pronto</b>\n"
@@ -513,6 +558,27 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             task_type=TaskType.CODE_REVIEW,
             progress=60,
         )
+
+        # ── GATE: approvazione deploy ────────────────────────────────────────
+        deploy_approved = await self._request_user_approval(
+            task_id,
+            f"🚀 <b>Pronto per il deployment</b>\n\n"
+            f"📦 Progetto: <code>{project_name}</code>\n"
+            f"🛠️ Stack: {tech_stack}\n"
+            f"📄 {len(plan.get('files', []))} file generati e revisionati\n\n"
+            "Confermo il push su <b>GitHub</b> e il deploy su <b>Vercel</b>?",
+            timeout=600.0,
+            progress=78,
+        )
+        if not deploy_approved:
+            task_cost = cost_tracker.get_task_cost(task_id)
+            return (
+                f"🛑 <b>Deployment annullato su tua richiesta.</b>\n\n"
+                f"Il progetto <code>{project_name}</code> è stato costruito e revisionato "
+                f"localmente in <code>{workdir}</code>.\n"
+                "Puoi avviare il deploy in qualsiasi momento riprendendo il progetto.\n"
+                f"💰 Costo finora: ${task_cost:.3f}"
+            )
 
         # ── FASE 4: DEPLOYER ────────────────────────────────────────────────
         await notify("🚀 <b>WebDev</b> — <b>FASE 4/4</b>: Deploy su GitHub + Vercel…")

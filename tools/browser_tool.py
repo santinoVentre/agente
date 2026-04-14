@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 from config import config
 from db.models import RiskLevel
@@ -10,6 +12,31 @@ from tools.base_tool import BaseTool
 from utils.logging import setup_logging
 
 log = setup_logging("tool_browser")
+
+# Patterns that match internal / metadata / loopback addresses
+_SSRF_BLOCKED_HOST_RE = re.compile(
+    r"^("
+    r"localhost"
+    r"|127\.\d+\.\d+\.\d+"
+    r"|0\.0\.0\.0"
+    r"|::1"
+    r"|169\.254\.\d+\.\d+"          # AWS/GCP link-local metadata
+    r"|10\.\d+\.\d+\.\d+"
+    r"|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+"
+    r"|192\.168\.\d+\.\d+"
+    r"|fd[0-9a-f:]+"                  # ULA IPv6
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _is_ssrf_blocked(url: str) -> bool:
+    """Return True if the URL targets an internal or metadata address."""
+    try:
+        host = urlparse(url).hostname or ""
+        return bool(_SSRF_BLOCKED_HOST_RE.match(host))
+    except Exception:
+        return True  # fail-safe: block unparseable URLs
 
 
 class BrowserTool(BaseTool):
@@ -51,6 +78,17 @@ class BrowserTool(BaseTool):
         action = kwargs.get("action")
         if not action:
             return {"success": False, "error": "Missing required parameter(s): action.", "failure_kind": "invalid_args"}
+
+        # SSRF guard: reject requests to internal/metadata addresses
+        url_param = kwargs.get("url", "")
+        if url_param and _is_ssrf_blocked(url_param):
+            log.warning(f"[browser] SSRF attempt blocked: {url_param}")
+            return {
+                "success": False,
+                "error": f"URL bloccato: l'indirizzo '{url_param}' punta a una rete interna o di metadati.",
+                "failure_kind": "blocked",
+            }
+
         try:
             await self._ensure_browser()
             page = await self._browser.new_page()

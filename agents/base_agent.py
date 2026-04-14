@@ -252,6 +252,7 @@ class BaseAgent:
         _effective_max_tokens = self.max_tokens_per_task or config.max_tokens_per_task
 
         iteration = 0
+        consecutive_tool_successes = 0  # for escalation hysteresis
         while True:
             if self._iteration_limit_enabled() and iteration >= max_iterations:
                 # Reached iteration limit — optionally ask for continuation
@@ -464,6 +465,7 @@ class BaseAgent:
                         else:
                             consecutive_tool_errors += 1
                             consecutive_invalid_tool_calls = 0
+                            consecutive_tool_successes = 0
 
                         if consecutive_invalid_tool_calls >= MAX_CONSECUTIVE_INVALID_TOOL_CALLS:
                             await notify(
@@ -485,16 +487,19 @@ class BaseAgent:
                                 )
                                 model = escalated
                     else:
-                        if model != base_model:
-                            restored_model = exec_state.reset_model()
-                            log.info(
-                                f"[{self.name}] Task #{task_id}: restoring model "
-                                f"{model} → {restored_model} after successful tool execution"
-                            )
-                            model = restored_model
+                        consecutive_tool_successes += 1
                         consecutive_tool_errors = 0
                         consecutive_invalid_tool_calls = 0
                         last_failure_summary = ""
+                        # Restore base model only after 3 consecutive successes (hysteresis)
+                        if model != base_model and consecutive_tool_successes >= 3:
+                            restored_model = exec_state.reset_model()
+                            log.info(
+                                f"[{self.name}] Task #{task_id}: restoring model "
+                                f"{model} → {restored_model} after {consecutive_tool_successes} successes"
+                            )
+                            model = restored_model
+                            consecutive_tool_successes = 0
 
                     if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS:
                         await notify(
