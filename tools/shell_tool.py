@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
+import shutil
 from typing import Any
 
 from config import config
@@ -75,12 +77,23 @@ class ShellTool(BaseTool):
         log.info(f"Shell exec: {command} (cwd={cwd}, timeout={timeout}s)")
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
+            bash_path = shutil.which("bash") if os.name != "nt" else None
+            if bash_path:
+                proc = await asyncio.create_subprocess_exec(
+                    bash_path,
+                    "-lc",
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             return {
                 "success": proc.returncode == 0,
