@@ -25,6 +25,16 @@ MAX_CONTINUATIONS = 2  # Max times user can approve continuing past iteration li
 HEARTBEAT_SECONDS = 45
 MAX_SAME_TOOL_CALLS = 3
 MAX_CONSECUTIVE_TOOL_ERRORS = 4
+_HUMAN_INTERVENTION_ERROR_PATTERNS = (
+    "permission denied",
+    "operation not permitted",
+    "eacces",
+    "read-only file system",
+    "security blocked",
+    "blocked pattern detected",
+    "access to protected",
+    "action rejected by user",
+)
 
 
 class BaseAgent:
@@ -53,6 +63,29 @@ class BaseAgent:
 
     def get_tool_schemas(self) -> list[dict]:
         return [t.to_openai_schema() for t in self._tools.values()]
+
+    def _tool_failure_requires_human(
+        self,
+        tool_name: str,
+        result: dict[str, Any],
+    ) -> tuple[bool, str]:
+        failure_kind = str(result.get("failure_kind", "")).lower()
+        if failure_kind in {"blocked", "approval_rejected"}:
+            return True, result.get("error") or "Azione bloccata o respinta."
+
+        error_text = "\n".join(
+            str(part)
+            for part in (
+                result.get("error", ""),
+                result.get("stderr", ""),
+            )
+            if part
+        ).strip()
+        lowered = error_text.lower()
+        if tool_name == "shell" and any(pattern in lowered for pattern in _HUMAN_INTERVENTION_ERROR_PATTERNS):
+            return True, error_text or "Errore shell che richiede intervento umano."
+
+        return False, error_text
 
     async def _request_user_approval(
         self,
@@ -95,7 +128,12 @@ class BaseAgent:
                 f"BLOCKED: {block_reason}",
                 parameters, assessed_risk, verdict,
             )
-            return {"success": False, "error": f"Security blocked: {block_reason}"}
+            return {
+                "success": False,
+                "error": f"Security blocked: {block_reason}",
+                "failure_kind": "blocked",
+                "needs_human": True,
+            }
 
         if verdict == ActionVerdict.PENDING:
             # Request approval via Telegram
@@ -111,7 +149,12 @@ class BaseAgent:
                     "User rejected action",
                     parameters, assessed_risk, ActionVerdict.BLOCKED,
                 )
-                return {"success": False, "error": "Action rejected by user."}
+                return {
+                    "success": False,
+                    "error": "Action rejected by user.",
+                    "failure_kind": "approval_rejected",
+                    "needs_human": True,
+                }
             verdict = ActionVerdict.APPROVED
 
         # Execute
@@ -369,6 +412,18 @@ class BaseAgent:
                     result = await self.execute_tool(tool_name, args, task_id)
 
                     if not result.get("success", True):
+                        requires_human, failure_reason = self._tool_failure_requires_human(tool_name, result)
+                        if requires_human:
+                            summary = failure_reason or result.get("error") or "Blocco operativo non risolvibile automaticamente."
+                            await notify(
+                                f"⚠️ Task #{task_id}: fermato su <b>{tool_name}</b> per intervento umano richiesto.<br/>"
+                                f"Motivo: <code>{summary[:500]}</code>"
+                            )
+                            return (
+                                "Mi sono fermato per evitare tentativi costosi ripetuti. "
+                                f"Il tool {tool_name} richiede il tuo intervento o una decisione esplicita: {summary}"
+                            )
+
                         consecutive_tool_errors += 1
                         # Model escalation: if repeated failures, escalate tier
                         if consecutive_tool_errors >= 2:
