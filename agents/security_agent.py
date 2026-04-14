@@ -16,7 +16,7 @@ _SHELL_BLOCKLIST = [
     r"rm\s+-rf\s+/(?!\s*srv/agent)",  # rm -rf / (but allow within /srv/agent)
     r"mkfs\.",
     r"dd\s+if=",
-    r">\s*/dev/",
+    r"\d*>\s*/dev/(?!null\b)",
     r"chmod\s+777\s+/",
     r"curl\s+.*\|\s*(?:ba)?sh",
     r"wget\s+.*\|\s*(?:ba)?sh",
@@ -47,17 +47,107 @@ _ALWAYS_PROTECTED_PATTERNS = [
     ".env",          # Never expose environment secrets
 ]
 
+_READ_ONLY_DIAGNOSTIC_TOKENS = {
+    "find",
+    "grep",
+    "egrep",
+    "fgrep",
+    "cat",
+    "head",
+    "tail",
+    "sed",
+    "awk",
+    "ls",
+    "pwd",
+    "stat",
+    "file",
+    "wc",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "realpath",
+    "readlink",
+    "which",
+    "whereis",
+    "env",
+    "printenv",
+    "echo",
+    "node",
+    "npm",
+    "pnpm",
+    "yarn",
+    "git",
+}
+
+_READ_ONLY_BLOCKED_SNIPPETS = (
+    " rm ",
+    "mv ",
+    "cp ",
+    "chmod ",
+    "chown ",
+    "mkdir ",
+    "rmdir ",
+    "touch ",
+    "tee ",
+    "install ",
+    "apt ",
+    "apt-get ",
+    "pip ",
+    "npm install",
+    "pnpm add",
+    "yarn add",
+    "systemctl ",
+    "docker ",
+    "curl ",
+    "wget ",
+)
+
 
 class SecurityAgent:
     """Intercepts and validates every action before it runs."""
 
+    def _is_read_only_diagnostic_command(self, command: str) -> bool:
+        cmd = command.strip().lower()
+        if not cmd:
+            return False
+        if any(snippet in f" {cmd} " for snippet in _READ_ONLY_BLOCKED_SNIPPETS):
+            return False
+
+        normalized = re.sub(r"\b\w+>/dev/null\b", " ", cmd)
+        normalized = re.sub(r"\s*&&\s*", " ; ", normalized)
+        normalized = re.sub(r"\s*\|\|\s*", " ; ", normalized)
+        normalized = re.sub(r"\s*\|\s*", " ; ", normalized)
+        normalized = normalized.replace("(", " ").replace(")", " ")
+        normalized = normalized.replace("{", " ").replace("}", " ")
+
+        segments = [segment.strip() for segment in normalized.split(";") if segment.strip()]
+        if not segments:
+            return False
+
+        for segment in segments:
+            segment = re.sub(r"^cd\s+[^;]+", "", segment).strip()
+            if not segment:
+                continue
+            token = segment.split()[0]
+            if token not in _READ_ONLY_DIAGNOSTIC_TOKENS:
+                return False
+        return True
+
     def assess_shell_command(self, command: str) -> tuple[RiskLevel, str | None]:
         """Assess a shell command's risk. Returns (risk_level, block_reason_or_none)."""
+        cmd_lower = command.lower()
+
+        # Safe diagnostic / inspection commands in read-only mode should stay cheap.
+        if self._is_read_only_diagnostic_command(command):
+            for path in _ALWAYS_PROTECTED_PATTERNS:
+                if path in cmd_lower:
+                    return RiskLevel.CRITICAL, f"Access to protected system path: {path}"
+            return RiskLevel.LOW, None
+
         for pattern in _SHELL_BLOCKLIST:
             if re.search(pattern, command, re.IGNORECASE):
                 return RiskLevel.CRITICAL, f"Blocked pattern detected: {pattern}"
-
-        cmd_lower = command.lower()
 
         # Check for protected system paths
         for path in _ALWAYS_PROTECTED_PATTERNS:

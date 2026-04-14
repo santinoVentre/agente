@@ -420,7 +420,7 @@ class BaseAgent:
                         if requires_human:
                             summary = failure_reason or result.get("error") or "Blocco operativo non risolvibile automaticamente."
                             await notify(
-                                f"⚠️ Task #{task_id}: fermato su <b>{tool_name}</b> per intervento umano richiesto.<br/>"
+                                f"⚠️ Task #{task_id}: fermato su <b>{tool_name}</b> per intervento umano richiesto.\n"
                                 f"Motivo: <code>{summary[:500]}</code>"
                             )
                             return (
