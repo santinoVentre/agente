@@ -27,6 +27,8 @@ class ExecutionState:
     task_id: int
     steps: int = 0
     total_tokens: int = 0
+    base_model: str = ""
+    base_model_level: int = 0
     model_level: int = 0                                # 0=cheap, 1=mid, 2=expensive
     retry_count: int = 0
     _action_counts: dict[str, int] = field(default_factory=dict)
@@ -62,6 +64,22 @@ class ExecutionState:
         return self.steps > 0 and self.steps % SUMMARY_INTERVAL == 0
 
     # ── retry / escalation ───────────────────────────────────────────
+
+    def _level_for_model(self, model: str) -> int:
+        if model == config.model_expensive:
+            return 2
+        if model == config.model_mid or model == config.model_mid_fallback:
+            return 1
+        return 0
+
+    def configure_base_model(self, model: str) -> None:
+        self.base_model = model
+        self.base_model_level = self._level_for_model(model)
+        self.model_level = self.base_model_level
+
+    def reset_model(self) -> str:
+        self.model_level = self.base_model_level
+        return self.base_model or config.model_cheap
 
     def escalate_model(self) -> str | None:
         """Escalate to the next model tier; return the new model string or None if already maxed."""

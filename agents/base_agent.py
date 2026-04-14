@@ -147,7 +147,8 @@ class BaseAgent:
         handle tool calls iteratively until the LLM returns a final text response.
         Enforces per-task and daily cost budgets.
         """
-        model = model_override or get_model_for_task(self.default_task_type)
+        base_model = model_override or get_model_for_task(self.default_task_type)
+        model = base_model
         messages = []
 
         if system_prompt:
@@ -172,6 +173,7 @@ class BaseAgent:
 
         # ── Execution controller state for this run ──────────────────
         exec_state = execution_controller.get(task_id)
+        exec_state.configure_base_model(base_model)
         run_start_steps = exec_state.steps
         run_start_tokens = exec_state.total_tokens
         _effective_max_steps = self.max_steps_per_task or config.max_steps_per_task
@@ -378,6 +380,13 @@ class BaseAgent:
                                 )
                                 model = escalated
                     else:
+                        if model != base_model:
+                            restored_model = exec_state.reset_model()
+                            log.info(
+                                f"[{self.name}] Task #{task_id}: restoring model "
+                                f"{model} → {restored_model} after successful tool execution"
+                            )
+                            model = restored_model
                         consecutive_tool_errors = 0
 
                     if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS:
