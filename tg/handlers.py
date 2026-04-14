@@ -136,6 +136,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🤖 <b>Agent Infrastructure Online</b>\n"
         "Mandami qualsiasi richiesta e ci penso io.\n\n"
         "/websites — scegli un sito da creare o modificare\n"
+        "/verify_site &lt;nome&gt; — verifica repo GitHub e deploy Vercel reali\n"
         "/status — stato agenti e task\n"
         "/tasks — lista task attivi\n"
         "/costs — riepilogo costi API\n"
@@ -233,6 +234,102 @@ async def cmd_websites(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{q['question']}",
         parse_mode="HTML",
     )
+
+
+async def cmd_verify_site(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Verify a site's real GitHub/Vercel publish state without going through PM."""
+    if not _is_authorized(update):
+        return
+    if _orchestrator is None:
+        await update.message.reply_text("⏳ Orchestrator not ready")
+        return
+    if not ctx.args:
+        await update.message.reply_text("Uso: /verify_site <nome_progetto>")
+        return
+
+    project_name = " ".join(ctx.args).strip()
+    from core.project_registry import project_registry
+
+    project = await project_registry.get_project(project_name)
+    if not project:
+        await update.message.reply_text(
+            f"Progetto non trovato nel registry: <code>{project_name}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    await update.message.chat.send_action("typing")
+
+    github_result = await _orchestrator._tools["github"].execute(
+        action="get_repo",
+        repo_name=project.name,
+    )
+    vercel_project = await _orchestrator._tools["vercel"].execute(
+        action="get_project",
+        project_name=project.name,
+    )
+    vercel_deployments = await _orchestrator._tools["vercel"].execute(
+        action="list_deployments",
+        project_name=project.name,
+    )
+
+    repo_url = "-"
+    repo_ok = False
+    repo_error = ""
+    if github_result.get("success"):
+        repo = github_result.get("repo", {})
+        full_name = repo.get("full_name", "")
+        repo_url = repo.get("html_url", "-")
+        repo_ok = full_name.lower() == f"{config.github_owner}/{project.name}".lower()
+        if not repo_ok:
+            repo_error = f"owner/repo inatteso: {full_name or 'sconosciuto'}"
+    else:
+        repo_error = github_result.get("error", "repo non trovato")
+
+    deployments = vercel_deployments.get("deployments", []) if vercel_deployments.get("success") else []
+    ready_deployment = next(
+        (deployment for deployment in deployments if str(deployment.get("state", "")).lower() == "ready"),
+        None,
+    )
+    deploy_url = f"https://{ready_deployment['url']}" if ready_deployment and ready_deployment.get("url") else "-"
+    deploy_ok = bool(vercel_project.get("success") and ready_deployment)
+    deploy_error = ""
+    if not deploy_ok:
+        deploy_error = (
+            vercel_project.get("error", "") or
+            vercel_deployments.get("error", "") or
+            "deployment ready non trovata"
+        )
+
+    lines = [
+        f"🔎 <b>Verifica sito:</b> <code>{project.name}</code>",
+        f"GitHub verificato: <b>{'SI' if repo_ok else 'NO'}</b>",
+        f"Repo: <code>{repo_url}</code>",
+    ]
+    if repo_error:
+        lines.append(f"Errore GitHub: <code>{repo_error[:300]}</code>")
+
+    lines.extend([
+        f"Vercel verificato: <b>{'SI' if deploy_ok else 'NO'}</b>",
+        f"Deploy: <code>{deploy_url}</code>",
+    ])
+    if deploy_error:
+        lines.append(f"Errore Vercel: <code>{deploy_error[:300]}</code>")
+
+    await project_registry.upsert_project(
+        name=project.name,
+        description=project.description,
+        workspace_path=project.workspace_path,
+        github_repo=f"{config.github_owner}/{project.name}" if repo_ok else None,
+        domain=project.domain,
+        deploy_provider="vercel",
+        deploy_url=deploy_url if deploy_ok else None,
+        status=project.status,
+        metadata_json=project.metadata_json,
+        mark_deployed=deploy_ok,
+    )
+
+    await _reply_html_safe(update.message, "\n".join(lines))
 
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -577,6 +674,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/tools — lista tool disponibili\n"
         "/projects — lista progetti registrati\n"
         "/websites — selettore siti web (crea/modifica)\n"
+        "/verify_site &lt;nome&gt; — verifica stato reale di un sito\n"
         "/cancel &lt;id&gt; — annulla un task\n"
         "/cancel_all — cancella tutti i task attivi/bloccati\n"
         "/force_cancel &lt;id&gt; — forza cancellazione task bloccato\n"

@@ -97,6 +97,19 @@ _INTERNAL_OUTPUT_PATTERNS = [
     r"parameter name=",
     r"PM_CONTEXT",
 ]
+_PUBLISH_CLAIM_PATTERNS = [
+    r"deploy",
+    r"vercel",
+    r"github",
+    r"repository",
+    r"repo",
+    r"online",
+    r"sito live",
+    r"dashboard",
+    r"https://github\.com/",
+    r"https://[^\s]+\.vercel\.app",
+    r"https://vercel\.com/",
+]
 
 
 class ProjectManagerAgent(BaseAgent):
@@ -200,6 +213,87 @@ class ProjectManagerAgent(BaseAgent):
     def _contains_internal_output(self, text: str) -> bool:
         return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _INTERNAL_OUTPUT_PATTERNS)
 
+    def _contains_publish_claims(self, text: str) -> bool:
+        return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _PUBLISH_CLAIM_PATTERNS)
+
+    async def _verify_live_publish(self, task_id: int) -> dict[str, str | bool]:
+        github_result = await self.execute_tool(
+            "github",
+            {"action": "get_repo", "repo_name": self.project_name},
+            task_id,
+        )
+        vercel_project = await self.execute_tool(
+            "vercel",
+            {"action": "get_project", "project_name": self.project_name},
+            task_id,
+        )
+        vercel_deployments = await self.execute_tool(
+            "vercel",
+            {"action": "list_deployments", "project_name": self.project_name},
+            task_id,
+        )
+
+        repo_url = ""
+        repo_verified = False
+        if github_result.get("success"):
+            repo = github_result.get("repo", {})
+            repo_url = repo.get("html_url", "")
+            full_name = repo.get("full_name", "")
+            repo_verified = bool(repo_url and full_name.lower() == f"{config.github_owner}/{self.project_name}".lower())
+
+        deployments = vercel_deployments.get("deployments", []) if vercel_deployments.get("success") else []
+        ready_deployment = next(
+            (deployment for deployment in deployments if str(deployment.get("state", "")).lower() == "ready"),
+            None,
+        )
+        deploy_url = f"https://{ready_deployment['url']}" if ready_deployment and ready_deployment.get("url") else ""
+        vercel_verified = bool(vercel_project.get("success") and deploy_url)
+
+        return {
+            "repo_verified": repo_verified,
+            "repo_url": repo_url,
+            "repo_error": github_result.get("error", "") if not github_result.get("success") else "",
+            "vercel_verified": vercel_verified,
+            "deploy_url": deploy_url,
+            "deploy_error": (
+                vercel_project.get("error", "") or vercel_deployments.get("error", "")
+            ) if not vercel_verified else "",
+            "dashboard_url": f"https://vercel.com/{self.project_name}",
+        }
+
+    async def _enforce_verified_publish_reply(self, raw_text: str, task_id: int) -> str:
+        verification = await self._verify_live_publish(task_id)
+        repo_url = verification.get("repo_url", "")
+        deploy_url = verification.get("deploy_url", "")
+        repo_verified = bool(verification.get("repo_verified"))
+        vercel_verified = bool(verification.get("vercel_verified"))
+
+        if repo_verified and vercel_verified:
+            return (
+                f"Ho verificato lo stato reale del progetto \"{self.project_name}\".\n\n"
+                f"Repository GitHub verificato: {repo_url}\n"
+                f"Deploy Vercel verificato: {deploy_url}\n\n"
+                "Se vuoi, ora posso procedere con modifiche, controllo contenuti o una verifica funzionale del sito."
+            )
+
+        problems = []
+        if not repo_verified:
+            problems.append(
+                f"Repository GitHub non verificato ({verification.get('repo_error') or 'repo non trovato sotto l owner configurato'})"
+            )
+        if not vercel_verified:
+            problems.append(
+                f"Deploy Vercel non verificato ({verification.get('deploy_error') or 'deployment ready non trovata'})"
+            )
+
+        return (
+            f"Non posso confermare il deploy del progetto \"{self.project_name}\".\n\n"
+            + "\n".join(f"- {problem}" for problem in problems)
+            + "\n\n"
+            + "Ignoro URL o owner comparsi in precedenza se non coincidono con le verifiche reali dei tool. "
+            + "Se vuoi, posso procedere ora con una nuova pubblicazione verificata."
+        )
+
     async def _rewrite_internal_output(self, raw_text: str, task_id: int) -> str:
         """Convert leaked/internal PM output into a short, user-safe reply.
 
@@ -242,6 +336,8 @@ class ProjectManagerAgent(BaseAgent):
             )
         if self._contains_internal_output(text):
             return await self._rewrite_internal_output(text, task_id)
+        if self._contains_publish_claims(text):
+            return await self._enforce_verified_publish_reply(text, task_id)
         return text
 
     # ── Main entry point ──────────────────────────────────────────────────────
