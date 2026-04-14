@@ -176,7 +176,9 @@ class GitHubTool(BaseTool):
         }
 
     async def execute(self, **kwargs) -> dict[str, Any]:
-        action = kwargs["action"]
+        action = kwargs.get("action")
+        if not action:
+            return {"success": False, "error": "Missing required parameter(s): action.", "failure_kind": "invalid_args"}
         async with httpx.AsyncClient(headers=self._headers(), timeout=30.0) as client:
             try:
                 if action == "validate_auth":
@@ -229,7 +231,11 @@ class GitHubTool(BaseTool):
                     repo = kwargs["repo_name"]
                     source_dir = Path(kwargs["source_dir"]).resolve()
                     if not source_dir.exists() or not source_dir.is_dir():
-                        return {"success": False, "error": f"Source directory not found: {source_dir}"}
+                        return {
+                            "success": False,
+                            "error": f"Source directory not found: {source_dir}",
+                            "failure_kind": "not_found",
+                        }
 
                     await self._ensure_repo(
                         client=client,
@@ -299,9 +305,22 @@ class GitHubTool(BaseTool):
                     return {"success": True, "message": f"Deleted {owner}/{kwargs['repo_name']}"}
 
                 else:
-                    return {"success": False, "error": f"Unknown action: {action}"}
+                    return {"success": False, "error": f"Unknown action: {action}", "failure_kind": "invalid_args"}
 
             except httpx.HTTPStatusError as e:
-                return {"success": False, "error": f"GitHub API error: {e.response.status_code} {e.response.text[:500]}"}
+                status = e.response.status_code
+                if status in (401, 403):
+                    failure_kind = "auth_required"
+                elif status == 402:
+                    failure_kind = "billing_required"
+                elif status == 404:
+                    failure_kind = "not_found"
+                else:
+                    failure_kind = "remote_api_error"
+                return {
+                    "success": False,
+                    "error": f"GitHub API error: {status} {e.response.text[:500]}",
+                    "failure_kind": failure_kind,
+                }
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": str(e), "failure_kind": "runtime_error"}

@@ -25,6 +25,7 @@ MAX_CONTINUATIONS = 2  # Max times user can approve continuing past iteration li
 HEARTBEAT_SECONDS = 45
 MAX_SAME_TOOL_CALLS = 3
 MAX_CONSECUTIVE_TOOL_ERRORS = 4
+MAX_CONSECUTIVE_INVALID_TOOL_CALLS = 3
 _HUMAN_INTERVENTION_ERROR_PATTERNS = (
     "permission denied",
     "operation not permitted",
@@ -35,7 +36,7 @@ _HUMAN_INTERVENTION_ERROR_PATTERNS = (
     "access to protected",
     "action rejected by user",
 )
-_NON_ESCALATION_FAILURE_KINDS = {"not_found"}
+_NON_ESCALATION_FAILURE_KINDS = {"not_found", "invalid_args"}
 
 
 class BaseAgent:
@@ -65,6 +66,23 @@ class BaseAgent:
     def get_tool_schemas(self) -> list[dict]:
         return [t.to_openai_schema() for t in self._tools.values()]
 
+    def _validate_tool_parameters(self, tool: Any, parameters: dict[str, Any]) -> str | None:
+        schema = tool.get_parameters_schema() or {}
+        required = schema.get("required", [])
+        missing = [name for name in required if parameters.get(name) in (None, "")]
+        if missing:
+            return f"Missing required parameter(s): {', '.join(missing)}."
+
+        properties = schema.get("properties", {})
+        for key, value in parameters.items():
+            prop = properties.get(key)
+            if not prop:
+                continue
+            allowed = prop.get("enum")
+            if allowed and value not in allowed:
+                return f"Invalid value for '{key}': {value!r}. Allowed: {', '.join(map(str, allowed))}."
+        return None
+
     def _tool_failure_requires_human(
         self,
         tool_name: str,
@@ -73,8 +91,6 @@ class BaseAgent:
         failure_kind = str(result.get("failure_kind", "")).lower()
         if failure_kind in {"blocked", "approval_rejected"}:
             return True, result.get("error") or "Azione bloccata o respinta."
-        if failure_kind == "invalid_args":
-            return True, result.get("error") or "Tool call non valida generata dal modello."
 
         error_text = "\n".join(
             str(part)
@@ -112,6 +128,14 @@ class BaseAgent:
         tool = self._tools.get(tool_name)
         if not tool:
             return {"success": False, "error": f"Tool '{tool_name}' not found."}
+
+        validation_error = self._validate_tool_parameters(tool, parameters)
+        if validation_error:
+            return {
+                "success": False,
+                "error": validation_error,
+                "failure_kind": "invalid_args",
+            }
 
         # Security check
         risk = tool.risk_level
@@ -207,6 +231,7 @@ class BaseAgent:
         max_iterations = self.max_iterations or 0
         continuations = 0
         consecutive_tool_errors = 0
+        consecutive_invalid_tool_calls = 0
         same_tool_call_streak = 0
         last_tool_signature = ""
         last_failure_summary = ""
@@ -432,8 +457,23 @@ class BaseAgent:
                         failure_kind = str(result.get("failure_kind", "")).lower()
                         if failure_kind in _NON_ESCALATION_FAILURE_KINDS:
                             consecutive_tool_errors = 0
+                            if failure_kind == "invalid_args":
+                                consecutive_invalid_tool_calls += 1
+                            else:
+                                consecutive_invalid_tool_calls = 0
                         else:
                             consecutive_tool_errors += 1
+                            consecutive_invalid_tool_calls = 0
+
+                        if consecutive_invalid_tool_calls >= MAX_CONSECUTIVE_INVALID_TOOL_CALLS:
+                            await notify(
+                                f"⚠️ Task #{task_id}: fermato per tool-call malformate ripetute su <b>{tool_name}</b>.\n"
+                                f"Ultimo motivo: <code>{last_failure_summary[:500]}</code>"
+                            )
+                            return (
+                                "Mi sono fermato per evitare un loop di tool-call malformate generate dal modello. "
+                                f"Ultimo errore sul tool {tool_name}: {last_failure_summary}"
+                            )
 
                         # Model escalation: if repeated failures, escalate tier
                         if consecutive_tool_errors >= 2:
@@ -453,6 +493,7 @@ class BaseAgent:
                             )
                             model = restored_model
                         consecutive_tool_errors = 0
+                        consecutive_invalid_tool_calls = 0
                         last_failure_summary = ""
 
                     if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS:

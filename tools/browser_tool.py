@@ -48,13 +48,18 @@ class BrowserTool(BaseTool):
             self._browser = await self._playwright.chromium.launch(headless=True)
 
     async def execute(self, **kwargs) -> dict[str, Any]:
-        action = kwargs["action"]
+        action = kwargs.get("action")
+        if not action:
+            return {"success": False, "error": "Missing required parameter(s): action.", "failure_kind": "invalid_args"}
         try:
             await self._ensure_browser()
             page = await self._browser.new_page()
 
             if action == "navigate":
                 url = kwargs.get("url", "")
+                if not url:
+                    await page.close()
+                    return {"success": False, "error": "Missing required parameter(s): url.", "failure_kind": "invalid_args"}
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 title = await page.title()
                 await page.close()
@@ -62,6 +67,9 @@ class BrowserTool(BaseTool):
 
             elif action == "screenshot":
                 url = kwargs.get("url", "")
+                if not url:
+                    await page.close()
+                    return {"success": False, "error": "Missing required parameter(s): url.", "failure_kind": "invalid_args"}
                 save_path = kwargs.get("save_path", str(config.media_dir / "screenshot.png"))
                 await page.goto(url, wait_until="networkidle", timeout=30000)
                 await page.screenshot(path=save_path, full_page=True)
@@ -70,6 +78,9 @@ class BrowserTool(BaseTool):
 
             elif action == "get_text":
                 url = kwargs.get("url", "")
+                if not url:
+                    await page.close()
+                    return {"success": False, "error": "Missing required parameter(s): url.", "failure_kind": "invalid_args"}
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 text = await page.inner_text("body")
                 await page.close()
@@ -77,6 +88,9 @@ class BrowserTool(BaseTool):
 
             elif action == "get_html":
                 url = kwargs.get("url", "")
+                if not url:
+                    await page.close()
+                    return {"success": False, "error": "Missing required parameter(s): url.", "failure_kind": "invalid_args"}
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 html = await page.content()
                 await page.close()
@@ -84,6 +98,9 @@ class BrowserTool(BaseTool):
 
             elif action == "download":
                 url = kwargs.get("url", "")
+                if not url:
+                    await page.close()
+                    return {"success": False, "error": "Missing required parameter(s): url.", "failure_kind": "invalid_args"}
                 save_path = kwargs.get("save_path", str(config.media_dir / "download"))
                 resp = await page.request.get(url)
                 body = await resp.body()
@@ -96,10 +113,10 @@ class BrowserTool(BaseTool):
 
             else:
                 await page.close()
-                return {"success": False, "error": f"Action '{action}' not fully implemented yet."}
+                return {"success": False, "error": f"Action '{action}' not fully implemented yet.", "failure_kind": "invalid_args"}
 
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": str(e), "failure_kind": "runtime_error"}
 
     async def close(self):
         if self._browser:
