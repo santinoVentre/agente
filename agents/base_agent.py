@@ -35,6 +35,7 @@ _HUMAN_INTERVENTION_ERROR_PATTERNS = (
     "access to protected",
     "action rejected by user",
 )
+_NON_ESCALATION_FAILURE_KINDS = {"not_found"}
 
 
 class BaseAgent:
@@ -72,6 +73,8 @@ class BaseAgent:
         failure_kind = str(result.get("failure_kind", "")).lower()
         if failure_kind in {"blocked", "approval_rejected"}:
             return True, result.get("error") or "Azione bloccata o respinta."
+        if failure_kind == "invalid_args":
+            return True, result.get("error") or "Tool call non valida generata dal modello."
 
         error_text = "\n".join(
             str(part)
@@ -206,6 +209,7 @@ class BaseAgent:
         consecutive_tool_errors = 0
         same_tool_call_streak = 0
         last_tool_signature = ""
+        last_failure_summary = ""
         loop = asyncio.get_running_loop()
         last_heartbeat = loop.time()
         length_continuations = 0
@@ -424,7 +428,13 @@ class BaseAgent:
                                 f"Il tool {tool_name} richiede il tuo intervento o una decisione esplicita: {summary}"
                             )
 
-                        consecutive_tool_errors += 1
+                        last_failure_summary = failure_reason or result.get("error") or f"Errore sul tool {tool_name}."
+                        failure_kind = str(result.get("failure_kind", "")).lower()
+                        if failure_kind in _NON_ESCALATION_FAILURE_KINDS:
+                            consecutive_tool_errors = 0
+                        else:
+                            consecutive_tool_errors += 1
+
                         # Model escalation: if repeated failures, escalate tier
                         if consecutive_tool_errors >= 2:
                             escalated = exec_state.escalate_model()
@@ -443,6 +453,7 @@ class BaseAgent:
                             )
                             model = restored_model
                         consecutive_tool_errors = 0
+                        last_failure_summary = ""
 
                     if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS:
                         await notify(
@@ -480,5 +491,11 @@ class BaseAgent:
                     ),
                 })
                 continue
+
+            if not content and last_failure_summary:
+                return (
+                    "Mi sono fermato senza un esito affidabile perche' ho incontrato un problema operativo preciso: "
+                    f"{last_failure_summary}"
+                )
 
             return content

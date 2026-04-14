@@ -117,18 +117,34 @@ class FileSystemTool(BaseTool):
         }
 
     async def execute(self, **kwargs) -> dict[str, Any]:
-        action: str = kwargs["action"]
-        path: str = kwargs["path"]
+        action = kwargs.get("action")
+        path = kwargs.get("path")
+
+        if not action or not path:
+            missing = []
+            if not action:
+                missing.append("action")
+            if not path:
+                missing.append("path")
+            return {
+                "success": False,
+                "error": f"Missing required parameter(s): {', '.join(missing)}.",
+                "failure_kind": "invalid_args",
+            }
 
         if not _is_safe_path(path, action):
-            return {"success": False, "error": f"Access denied: path '{path}' is outside allowed directories."}
+            return {
+                "success": False,
+                "error": f"Access denied: path '{path}' is outside allowed directories.",
+                "failure_kind": "access_denied",
+            }
 
         p = Path(path)
 
         try:
             if action == "read":
                 if not p.exists():
-                    return {"success": False, "error": "File not found."}
+                    return {"success": False, "error": "File not found.", "failure_kind": "not_found"}
                 content = p.read_text(encoding="utf-8", errors="replace")
                 if len(content) > 50000:
                     content = content[:50000] + "\n... (truncated)"
@@ -150,7 +166,7 @@ class FileSystemTool(BaseTool):
 
             elif action == "list":
                 if not p.exists():
-                    return {"success": False, "error": "Directory not found."}
+                    return {"success": False, "error": "Directory not found.", "failure_kind": "not_found"}
                 entries = []
                 for entry in sorted(p.iterdir()):
                     entries.append({
@@ -163,7 +179,7 @@ class FileSystemTool(BaseTool):
 
             elif action == "delete":
                 if not p.exists():
-                    return {"success": False, "error": "Path not found."}
+                    return {"success": False, "error": "Path not found.", "failure_kind": "not_found"}
                 _append_activity_log("delete", p)
                 if p.is_dir():
                     shutil.rmtree(p)
@@ -183,14 +199,22 @@ class FileSystemTool(BaseTool):
             elif action == "move":
                 dest = kwargs.get("destination")
                 if not dest or not _is_safe_path(dest):
-                    return {"success": False, "error": "Invalid or unsafe destination."}
+                    return {
+                        "success": False,
+                        "error": "Invalid or unsafe destination.",
+                        "failure_kind": "invalid_args",
+                    }
                 shutil.move(str(p), dest)
                 _append_activity_log("move", p, details=f"destination={dest}")
                 _append_activity_log("moved_here", Path(dest), details=f"source={p}")
                 return {"success": True, "message": f"Moved {p} → {dest}"}
 
             else:
-                return {"success": False, "error": f"Unknown action: {action}"}
+                return {
+                    "success": False,
+                    "error": f"Unknown action: {action}",
+                    "failure_kind": "invalid_args",
+                }
 
         except Exception as e:
             return {"success": False, "error": str(e)}
