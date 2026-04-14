@@ -47,6 +47,20 @@ class Orchestrator:
     def register_tool(self, tool):
         self._tools[tool.name] = tool
 
+    def get_tool(self, tool_name: str):
+        """Return a registered tool, falling back to agent tool registries if needed."""
+        tool = self._tools.get(tool_name)
+        if tool is not None:
+            return tool
+
+        for agent in self._agents.values():
+            agent_tools = getattr(agent, "_tools", None) or {}
+            tool = agent_tools.get(tool_name)
+            if tool is not None:
+                self._tools[tool_name] = tool
+                return tool
+        return None
+
     # ── Intent classification ────────────────────────────────────────
 
     async def _classify_intent(self, message: str) -> TaskType:

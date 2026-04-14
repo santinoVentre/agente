@@ -260,15 +260,23 @@ async def cmd_verify_site(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.chat.send_action("typing")
 
-    github_result = await _orchestrator._tools["github"].execute(
+    github_tool = _orchestrator.get_tool("github")
+    vercel_tool = _orchestrator.get_tool("vercel")
+    if github_tool is None or vercel_tool is None:
+        await update.message.reply_text(
+            "❌ Tool GitHub/Vercel non disponibili nell'orchestrator. Riavvia il servizio e riprova.",
+        )
+        return
+
+    github_result = await github_tool.execute(
         action="get_repo",
         repo_name=project.name,
     )
-    vercel_project = await _orchestrator._tools["vercel"].execute(
+    vercel_project = await vercel_tool.execute(
         action="get_project",
         project_name=project.name,
     )
-    vercel_deployments = await _orchestrator._tools["vercel"].execute(
+    vercel_deployments = await vercel_tool.execute(
         action="list_deployments",
         project_name=project.name,
     )

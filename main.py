@@ -132,6 +132,8 @@ async def startup():
     orchestrator = Orchestrator()
     for agent in agents.values():
         orchestrator.register_agent(agent)
+        for tool in getattr(agent, "_tools", {}).values():
+            orchestrator.register_tool(tool)
     log.info(f"Orchestrator ready — {len(agents)} agents")
 
     # 5. Inject orchestrator into Telegram handlers
