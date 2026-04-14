@@ -114,15 +114,14 @@ async def _start_project_selection(update: Update, user_id: int, pending_message
     from core.project_registry import project_registry
     from core.project_selector import start_selector
 
-    all_projects = await project_registry.list_projects(limit=30)
-    active_projects = [p for p in all_projects if p.status in ("active", "building")]
-    if not active_projects:
+    selectable_projects = await project_registry.list_selectable_projects(limit=30)
+    if not selectable_projects:
         await update.effective_message.reply_text(
             "Nessun progetto esistente trovato. Scrivimi la richiesta e partiamo con un nuovo progetto.",
         )
         return
 
-    selector = start_selector(user_id, active_projects, pending_message)
+    selector = start_selector(user_id, selectable_projects, pending_message)
     await update.effective_message.reply_text(selector.format_menu(), parse_mode="HTML")
 
 
@@ -217,8 +216,7 @@ async def cmd_websites(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     from core.webdev_planner import PLANNING_QUESTIONS, start_session
 
     end_pm_session(user_id)
-    rows = await project_registry.list_projects(limit=30)
-    active_projects = [p for p in rows if p.status in ("active", "building")]
+    active_projects = await project_registry.list_selectable_projects(limit=30)
 
     if active_projects:
         await _start_project_selection(update, user_id, pending_message="Gestione sito web")

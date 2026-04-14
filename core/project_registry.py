@@ -14,6 +14,8 @@ log = setup_logging("project_registry")
 
 
 class ProjectRegistryService:
+    _HIDDEN_STATUSES = {"deleted", "archived"}
+
     async def upsert_project(
         self,
         name: str,
@@ -82,6 +84,25 @@ class ProjectRegistryService:
                 .limit(limit)
             )
             return list(result.scalars().all())
+
+    async def list_selectable_projects(self, limit: int = 30) -> list[ProjectRegistry]:
+        """Projects that should appear in the website selector.
+
+        A site may be deployato and still have a status different from `active`, so
+        the selector must not hide valid projects only because of status drift.
+        """
+        rows = await self.list_projects(limit=limit)
+        selectable: list[ProjectRegistry] = []
+        for row in rows:
+            status = (row.status or "").strip().lower()
+            if status in self._HIDDEN_STATUSES:
+                continue
+            if row.workspace_path or row.github_repo or row.deploy_url or row.last_deployed_at:
+                selectable.append(row)
+                continue
+            if status in ("active", "building", "deployed", "paused", "failed"):
+                selectable.append(row)
+        return selectable
 
     async def get_project(self, name: str) -> ProjectRegistry | None:
         async with async_session() as session:

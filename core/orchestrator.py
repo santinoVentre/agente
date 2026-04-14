@@ -137,8 +137,7 @@ class Orchestrator:
         if task_type == TaskType.WEB_DEV and get_session(user_id) is None:
             # Check for existing active projects
             try:
-                all_projects = await project_registry.list_projects(limit=30)
-                active_projects = [p for p in all_projects if p.status in ("active", "building")]
+                active_projects = await project_registry.list_selectable_projects(limit=30)
             except Exception:
                 active_projects = []
 
