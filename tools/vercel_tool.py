@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -31,21 +32,49 @@ class VercelTool(BaseTool):
             params["teamId"] = config.vercel_team_id
         return params
 
+    async def _get_project(self, client: httpx.AsyncClient, project_name: str) -> httpx.Response:
+        return await client.get(f"{VERCEL_API}/v9/projects/{project_name}", params=self._params())
+
+    async def _latest_deployment(self, client: httpx.AsyncClient, project_id: str | None) -> dict[str, Any] | None:
+        if not project_id:
+            return None
+        resp = await client.get(
+            f"{VERCEL_API}/v6/deployments",
+            params={**self._params(), "projectId": project_id, "limit": 1},
+        )
+        resp.raise_for_status()
+        deployments = resp.json().get("deployments", [])
+        if not deployments:
+            return None
+        deployment = deployments[0]
+        return {
+            "id": deployment.get("uid"),
+            "url": deployment.get("url"),
+            "state": deployment.get("state"),
+            "created": deployment.get("created"),
+        }
+
     def get_parameters_schema(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["deploy_from_github", "list_projects", "list_deployments", "get_project", "delete_project"],
+                    "enum": ["validate_auth", "deploy_from_github", "list_projects", "list_deployments", "get_project", "delete_project"],
                     "description": "Vercel action to perform.",
                 },
+                "owner": {"type": "string", "description": "GitHub owner/org. Defaults to configured owner."},
                 "project_name": {"type": "string", "description": "Vercel project name."},
                 "repo_name": {"type": "string", "description": "GitHub repo name to deploy from."},
                 "framework": {
                     "type": "string",
                     "description": "Framework preset (nextjs, vite, etc.).",
                     "default": "nextjs",
+                },
+                "wait_for_deployment": {
+                    "type": "boolean",
+                    "description": "Whether to briefly wait for a deployment to appear after linking the project.",
+                    "default": True,
                 },
             },
             "required": ["action"],
@@ -55,29 +84,80 @@ class VercelTool(BaseTool):
         action = kwargs["action"]
         async with httpx.AsyncClient(headers=self._headers(), timeout=60.0) as client:
             try:
+                if action == "validate_auth":
+                    resp = await client.get(f"{VERCEL_API}/v2/user", params=self._params())
+                    resp.raise_for_status()
+                    data = resp.json().get("user", {})
+                    return {
+                        "success": True,
+                        "user_id": data.get("id"),
+                        "username": data.get("username"),
+                        "email": data.get("email"),
+                        "team_id": config.vercel_team_id or None,
+                    }
+
                 if action == "deploy_from_github":
-                    owner = config.github_owner
+                    owner = kwargs.get("owner") or config.github_owner
                     repo = kwargs["repo_name"]
                     project_name = kwargs.get("project_name", repo)
+                    project_resp = await self._get_project(client, project_name)
 
-                    resp = await client.post(
-                        f"{VERCEL_API}/v10/projects",
-                        params=self._params(),
-                        json={
-                            "name": project_name,
-                            "framework": kwargs.get("framework", "nextjs"),
-                            "gitRepository": {
-                                "type": "github",
-                                "repo": f"{owner}/{repo}",
+                    if project_resp.status_code == 200:
+                        data = project_resp.json()
+                        created = False
+                    else:
+                        resp = await client.post(
+                            f"{VERCEL_API}/v10/projects",
+                            params=self._params(),
+                            json={
+                                "name": project_name,
+                                "framework": kwargs.get("framework", "nextjs"),
+                                "gitRepository": {
+                                    "type": "github",
+                                    "repo": f"{owner}/{repo}",
+                                },
                             },
-                        },
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
+                        )
+
+                        if resp.status_code == 409:
+                            project_resp = await self._get_project(client, project_name)
+                            project_resp.raise_for_status()
+                            data = project_resp.json()
+                            created = False
+                        else:
+                            resp.raise_for_status()
+                            data = resp.json()
+                            created = True
+
+                    latest = None
+                    if kwargs.get("wait_for_deployment", True):
+                        for _ in range(5):
+                            latest = await self._latest_deployment(client, data.get("id"))
+                            if latest:
+                                break
+                            await asyncio.sleep(2)
+
+                    if not latest:
+                        return {
+                            "success": False,
+                            "project_id": data.get("id"),
+                            "project_name": project_name,
+                            "project_url": f"https://{project_name}.vercel.app",
+                            "created": created,
+                            "error": (
+                                "Project linked on Vercel but no deployment was detected yet. "
+                                "Verify that the GitHub repository is accessible to the Vercel account/team."
+                            ),
+                        }
+
                     return {
                         "success": True,
                         "project_id": data.get("id"),
-                        "url": f"https://{project_name}.vercel.app",
+                        "project_name": project_name,
+                        "created": created,
+                        "url": f"https://{latest['url']}",
+                        "deployment_state": latest.get("state"),
+                        "deployment_id": latest.get("id"),
                     }
 
                 elif action == "list_projects":

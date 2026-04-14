@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,6 +16,11 @@ from utils.logging import setup_logging
 log = setup_logging("tool_github")
 
 GITHUB_API = "https://api.github.com"
+_SKIP_DIRS = {
+    ".git", "node_modules", ".next", "dist", "build", ".vercel", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".idea", ".vscode", "venv", ".venv",
+}
+_SKIP_FILES = {".DS_Store"}
 
 
 class GitHubTool(BaseTool):
@@ -28,22 +35,142 @@ class GitHubTool(BaseTool):
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
+    def _owner(self, kwargs: dict[str, Any]) -> str:
+        return kwargs.get("owner") or config.github_owner
+
+    async def _get_repo(self, client: httpx.AsyncClient, owner: str, repo_name: str) -> httpx.Response:
+        return await client.get(f"{GITHUB_API}/repos/{owner}/{repo_name}")
+
+    async def _ensure_repo(
+        self,
+        client: httpx.AsyncClient,
+        repo_name: str,
+        description: str,
+        private: bool,
+        owner: str,
+    ) -> dict[str, Any]:
+        existing = await self._get_repo(client, owner, repo_name)
+        if existing.status_code == 200:
+            data = existing.json()
+            return {
+                "success": True,
+                "existing": True,
+                "url": data.get("html_url"),
+                "clone_url": data.get("clone_url"),
+                "default_branch": data.get("default_branch", "main"),
+            }
+
+        resp = await client.post(
+            f"{GITHUB_API}/user/repos",
+            json={
+                "name": repo_name,
+                "description": description,
+                "private": private,
+                "auto_init": True,
+            },
+        )
+
+        if resp.status_code == 422:
+            existing = await self._get_repo(client, owner, repo_name)
+            existing.raise_for_status()
+            data = existing.json()
+            return {
+                "success": True,
+                "existing": True,
+                "url": data.get("html_url"),
+                "clone_url": data.get("clone_url"),
+                "default_branch": data.get("default_branch", "main"),
+            }
+
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "success": True,
+            "existing": False,
+            "url": data.get("html_url"),
+            "clone_url": data.get("clone_url"),
+            "default_branch": data.get("default_branch", "main"),
+        }
+
+    async def _resolve_branch(
+        self,
+        client: httpx.AsyncClient,
+        owner: str,
+        repo_name: str,
+        requested_branch: str | None,
+    ) -> str:
+        if requested_branch:
+            return requested_branch
+        resp = await self._get_repo(client, owner, repo_name)
+        if resp.status_code == 200:
+            return resp.json().get("default_branch", "main")
+        return "main"
+
+    def _should_skip(self, path: Path, source_dir: Path) -> bool:
+        rel_parts = path.relative_to(source_dir).parts
+        if any(part in _SKIP_DIRS for part in rel_parts[:-1]):
+            return True
+        return path.name in _SKIP_FILES
+
+    async def _upsert_file(
+        self,
+        client: httpx.AsyncClient,
+        owner: str,
+        repo_name: str,
+        repo_path: str,
+        raw_content: bytes,
+        branch: str,
+        commit_message: str,
+    ) -> dict[str, Any]:
+        sha = None
+        existing_resp = await client.get(
+            f"{GITHUB_API}/repos/{owner}/{repo_name}/contents/{repo_path}",
+            params={"ref": branch},
+        )
+
+        if existing_resp.status_code == 200:
+            existing = existing_resp.json()
+            sha = existing.get("sha")
+            if existing.get("encoding") == "base64" and existing.get("content"):
+                existing_bytes = base64.b64decode(existing["content"].encode())
+                if existing_bytes == raw_content:
+                    return {"success": True, "skipped": True, "path": repo_path}
+        elif existing_resp.status_code not in (404,):
+            existing_resp.raise_for_status()
+
+        payload = {
+            "message": commit_message,
+            "content": base64.b64encode(raw_content).decode(),
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        put_resp = await client.put(
+            f"{GITHUB_API}/repos/{owner}/{repo_name}/contents/{repo_path}",
+            json=payload,
+        )
+        put_resp.raise_for_status()
+        return {"success": True, "skipped": False, "path": repo_path}
+
     def get_parameters_schema(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create_repo", "push_file", "list_repos", "delete_repo", "get_repo"],
+                    "enum": ["validate_auth", "create_repo", "push_file", "push_directory", "list_repos", "delete_repo", "get_repo"],
                     "description": "GitHub action to perform.",
                 },
+                "owner": {"type": "string", "description": "GitHub owner/org. Defaults to configured owner."},
                 "repo_name": {"type": "string", "description": "Repository name."},
                 "description": {"type": "string", "description": "Repo description."},
                 "private": {"type": "boolean", "description": "Whether the repo is private.", "default": True},
                 "file_path": {"type": "string", "description": "Path within the repo (for push_file)."},
                 "content": {"type": "string", "description": "File content (for push_file)."},
+                "source_dir": {"type": "string", "description": "Absolute directory to sync to the repo (for push_directory)."},
                 "commit_message": {"type": "string", "description": "Commit message.", "default": "Update via agent"},
-                "branch": {"type": "string", "description": "Branch name.", "default": "main"},
+                "branch": {"type": "string", "description": "Branch name. Defaults to the repo default branch."},
             },
             "required": ["action"],
         }
@@ -52,47 +179,106 @@ class GitHubTool(BaseTool):
         action = kwargs["action"]
         async with httpx.AsyncClient(headers=self._headers(), timeout=30.0) as client:
             try:
-                if action == "create_repo":
-                    resp = await client.post(
-                        f"{GITHUB_API}/user/repos",
-                        json={
-                            "name": kwargs["repo_name"],
-                            "description": kwargs.get("description", ""),
-                            "private": kwargs.get("private", True),
-                            "auto_init": True,
-                        },
-                    )
+                if action == "validate_auth":
+                    resp = await client.get(f"{GITHUB_API}/user")
                     resp.raise_for_status()
                     data = resp.json()
-                    return {"success": True, "url": data["html_url"], "clone_url": data["clone_url"]}
+                    return {
+                        "success": True,
+                        "login": data.get("login"),
+                        "name": data.get("name"),
+                        "configured_owner": config.github_owner,
+                        "scopes": resp.headers.get("X-OAuth-Scopes", ""),
+                    }
+
+                if action == "create_repo":
+                    owner = self._owner(kwargs)
+                    ensured = await self._ensure_repo(
+                        client=client,
+                        repo_name=kwargs["repo_name"],
+                        description=kwargs.get("description", ""),
+                        private=kwargs.get("private", True),
+                        owner=owner,
+                    )
+                    return {"success": True, "owner": owner, **ensured}
 
                 elif action == "push_file":
-                    import base64
-                    owner = config.github_owner
+                    owner = self._owner(kwargs)
                     repo = kwargs["repo_name"]
                     path = kwargs["file_path"]
-                    content_b64 = base64.b64encode(kwargs["content"].encode()).decode()
-
-                    # Check if file exists (to get SHA for updates)
-                    sha = None
-                    check = await client.get(f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}")
-                    if check.status_code == 200:
-                        sha = check.json().get("sha")
-
-                    payload = {
-                        "message": kwargs.get("commit_message", "Update via agent"),
-                        "content": content_b64,
-                        "branch": kwargs.get("branch", "main"),
-                    }
-                    if sha:
-                        payload["sha"] = sha
-
-                    resp = await client.put(
-                        f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}",
-                        json=payload,
+                    branch = await self._resolve_branch(client, owner, repo, kwargs.get("branch"))
+                    result = await self._upsert_file(
+                        client=client,
+                        owner=owner,
+                        repo_name=repo,
+                        repo_path=path,
+                        raw_content=kwargs["content"].encode(),
+                        branch=branch,
+                        commit_message=kwargs.get("commit_message", "Update via agent"),
                     )
-                    resp.raise_for_status()
-                    return {"success": True, "message": f"Pushed {path} to {owner}/{repo}"}
+                    return {
+                        "success": True,
+                        "owner": owner,
+                        "branch": branch,
+                        "message": f"Pushed {path} to {owner}/{repo}",
+                        **result,
+                    }
+
+                elif action == "push_directory":
+                    owner = self._owner(kwargs)
+                    repo = kwargs["repo_name"]
+                    source_dir = Path(kwargs["source_dir"]).resolve()
+                    if not source_dir.exists() or not source_dir.is_dir():
+                        return {"success": False, "error": f"Source directory not found: {source_dir}"}
+
+                    await self._ensure_repo(
+                        client=client,
+                        repo_name=repo,
+                        description=kwargs.get("description", ""),
+                        private=kwargs.get("private", True),
+                        owner=owner,
+                    )
+                    branch = await self._resolve_branch(client, owner, repo, kwargs.get("branch"))
+
+                    pushed = 0
+                    skipped = 0
+                    failures: list[dict[str, str]] = []
+                    for file_path in sorted(source_dir.rglob("*")):
+                        if not file_path.is_file() or self._should_skip(file_path, source_dir):
+                            continue
+
+                        repo_path = file_path.relative_to(source_dir).as_posix()
+                        try:
+                            result = await self._upsert_file(
+                                client=client,
+                                owner=owner,
+                                repo_name=repo,
+                                repo_path=repo_path,
+                                raw_content=file_path.read_bytes(),
+                                branch=branch,
+                                commit_message=kwargs.get("commit_message", f"Sync project files for {repo}"),
+                            )
+                            if result.get("skipped"):
+                                skipped += 1
+                            else:
+                                pushed += 1
+                        except Exception as exc:
+                            failures.append({"path": repo_path, "error": str(exc)[:300]})
+
+                    return {
+                        "success": len(failures) == 0,
+                        "owner": owner,
+                        "repo": repo,
+                        "branch": branch,
+                        "pushed": pushed,
+                        "skipped": skipped,
+                        "failed": len(failures),
+                        "failures": failures[:20],
+                        "message": (
+                            f"Synced directory {source_dir} to {owner}/{repo} "
+                            f"(pushed={pushed}, skipped={skipped}, failed={len(failures)})"
+                        ),
+                    }
 
                 elif action == "list_repos":
                     resp = await client.get(f"{GITHUB_API}/user/repos", params={"per_page": 50, "sort": "updated"})
@@ -101,13 +287,13 @@ class GitHubTool(BaseTool):
                     return {"success": True, "repos": repos}
 
                 elif action == "get_repo":
-                    owner = config.github_owner
+                    owner = self._owner(kwargs)
                     resp = await client.get(f"{GITHUB_API}/repos/{owner}/{kwargs['repo_name']}")
                     resp.raise_for_status()
                     return {"success": True, "repo": resp.json()}
 
                 elif action == "delete_repo":
-                    owner = config.github_owner
+                    owner = self._owner(kwargs)
                     resp = await client.delete(f"{GITHUB_API}/repos/{owner}/{kwargs['repo_name']}")
                     resp.raise_for_status()
                     return {"success": True, "message": f"Deleted {owner}/{kwargs['repo_name']}"}
