@@ -16,7 +16,7 @@ from utils.logging import setup_logging
 log = setup_logging("execution_controller")
 
 MAX_STEPS: int = config.max_steps_per_task
-MAX_TOKENS_PER_TASK: int = 100_000
+MAX_TOKENS_PER_TASK: int = config.max_tokens_per_task
 MAX_SAME_ACTION: int = 2
 SUMMARY_INTERVAL: int = 3   # compress context every N steps
 MAX_RETRIES: int = 3        # per-action retry cap before model escalation
@@ -53,8 +53,9 @@ class ExecutionState:
         limit = max_steps if max_steps is not None else MAX_STEPS
         return (self.steps - start_steps) >= limit
 
-    def is_token_budget_exceeded(self) -> bool:
-        return self.total_tokens >= MAX_TOKENS_PER_TASK
+    def is_token_budget_exceeded(self, max_tokens: int | None = None, start_tokens: int = 0) -> bool:
+        limit = max_tokens if max_tokens is not None else MAX_TOKENS_PER_TASK
+        return (self.total_tokens - start_tokens) >= limit
 
     def should_compress(self) -> bool:
         """True every SUMMARY_INTERVAL steps (but not at step 0)."""

@@ -97,6 +97,7 @@ class WebDevAgent(BaseAgent):
     default_task_type = TaskType.WEB_DEV
     max_iterations = None
     max_steps_per_task = 40
+    max_tokens_per_task = config.max_tokens_per_web_task
     ask_approval_on_iteration_limit = False
     max_same_tool_calls = 6
     loop_approval_threshold = 10

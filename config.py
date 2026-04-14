@@ -69,6 +69,7 @@ class Config:
     # --- Execution controller ---
     max_steps_per_task: int = field(default_factory=lambda: _env_int("MAX_STEPS_PER_TASK", 8))
     max_tokens_per_task: int = field(default_factory=lambda: _env_int("MAX_TOKENS_PER_TASK", 100_000))
+    max_tokens_per_web_task: int = field(default_factory=lambda: _env_int("MAX_TOKENS_PER_WEB_TASK", 200_000))
     context_summary_interval: int = field(default_factory=lambda: _env_int("CONTEXT_SUMMARY_INTERVAL", 3))
 
     # --- Security ---
@@ -125,6 +126,7 @@ class Config:
             "--- Execution limits ---",
             f"MAX_STEPS_PER_TASK={self.max_steps_per_task}",
             f"MAX_TOKENS_PER_TASK={self.max_tokens_per_task}",
+            f"MAX_TOKENS_PER_WEB_TASK={self.max_tokens_per_web_task}",
             f"CONTEXT_SUMMARY_INTERVAL={self.context_summary_interval}",
             f"MAX_SHELL_TIMEOUT={self.max_shell_timeout}",
             f"PROTECTED_PATHS={self.protected_paths or '(none)'}",

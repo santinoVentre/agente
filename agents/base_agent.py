@@ -35,6 +35,7 @@ class BaseAgent:
     default_task_type: TaskType = TaskType.TOOL_EXECUTION
     max_iterations: int | None = 15
     max_steps_per_task: int | None = None
+    max_tokens_per_task: int | None = None
     max_continuations: int = MAX_CONTINUATIONS
     max_same_tool_calls: int = MAX_SAME_TOOL_CALLS
     loop_approval_threshold: int = MAX_SAME_TOOL_CALLS
@@ -172,7 +173,9 @@ class BaseAgent:
         # ── Execution controller state for this run ──────────────────
         exec_state = execution_controller.get(task_id)
         run_start_steps = exec_state.steps
+        run_start_tokens = exec_state.total_tokens
         _effective_max_steps = self.max_steps_per_task or config.max_steps_per_task
+        _effective_max_tokens = self.max_tokens_per_task or config.max_tokens_per_task
 
         iteration = 0
         while True:
@@ -236,14 +239,17 @@ class BaseAgent:
                 )
 
             # Token budget guard
-            if exec_state.is_token_budget_exceeded():
+            if exec_state.is_token_budget_exceeded(
+                max_tokens=_effective_max_tokens,
+                start_tokens=run_start_tokens,
+            ):
                 log.warning(
                     f"[{self.name}] Task #{task_id} token budget exceeded "
-                    f"({exec_state.total_tokens} / {MAX_TOKENS_PER_TASK})"
+                    f"({exec_state.total_tokens - run_start_tokens} / {_effective_max_tokens})"
                 )
                 return (
-                    f"Stopped: token budget exceeded ({exec_state.total_tokens} tokens used, "
-                    f"limit {MAX_TOKENS_PER_TASK}). Task may be incomplete."
+                    f"Stopped: token budget exceeded ({exec_state.total_tokens - run_start_tokens} tokens used, "
+                    f"limit {_effective_max_tokens}). Task may be incomplete."
                 )
 
             # Context compression every SUMMARY_INTERVAL steps — uses cheap model
