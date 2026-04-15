@@ -151,6 +151,11 @@ _SPECS_PROMPT = """\
 Sei un web architect senior. Date le risposte di un cliente durante una sessione di discovery,
 genera le specifiche complete del progetto web.
 
+REGOLE FONDAMENTALI:
+- Questo è un NUOVO progetto. NON riutilizzare nomi, descrizioni o dati di progetti precedenti.
+- Il project_name e business_name DEVONO corrispondere a ciò che il cliente ha descritto nelle risposte.
+- "description" è una stringa di testo semplice (2-3 frasi), NON un oggetto JSON annidato.
+
 Regole stack/versioni:
 - Per nuovi progetti preferisci uno stack moderno e coerente: Next.js 15.x + React 19.x + Tailwind CSS 4 + TypeScript 5.x + Node.js 22 LTS.
 - Non proporre Node o framework vecchi senza un vincolo esplicito del cliente.
@@ -161,10 +166,10 @@ Restituisci SOLO un oggetto JSON valido con questa struttura esatta:
 {
   "project_name": "nome-kebab-case",
   "business_name": "nome commerciale del progetto",
-  "description": "cosa fa il sito in 2-3 frasi",
+  "description": "cosa fa il sito in 2-3 frasi (stringa semplice, non JSON annidato)",
   "purpose": "obiettivo principale del sito",
   "target_audience": "chi sono i visitatori",
-    "tech_stack": "es. Next.js 15 + React 19 + Tailwind CSS 4 + TypeScript 5 + Node 22 LTS + Framer Motion",
+  "tech_stack": "es. Next.js 15 + React 19 + Tailwind CSS 4 + TypeScript 5 + Node 22 LTS + Framer Motion",
   "pages": [
     {
       "name": "Home",
@@ -515,6 +520,16 @@ async def _generate_specs(initial_message: str, answers: dict) -> dict:
 
     parsed = _extract_json_object(raw)
     if parsed is not None:
+        # Validate description is a plain string, not a nested JSON structure
+        desc = parsed.get("description", "")
+        if isinstance(desc, dict):
+            parsed["description"] = desc.get("description", str(desc))[:500]
+        elif isinstance(desc, str) and desc.strip().startswith("{"):
+            try:
+                nested = json.loads(desc)
+                parsed["description"] = nested.get("description", str(nested))[:500]
+            except (json.JSONDecodeError, ValueError):
+                pass
         return parsed
     log.warning(f"[webdev_planner] Specs non-JSON: {raw[:200]}")
     return {

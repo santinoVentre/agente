@@ -534,9 +534,14 @@ class Orchestrator:
                     deploy_url = deploy_match.group(1).strip() if deploy_match else ""
                     deploy_verified = (verified_match.group(1) == "SI") if verified_match else False
                     try:
+                        # Sanitize description: ensure it's a plain string
+                        raw_desc = specs.get("description", "")
+                        if isinstance(raw_desc, dict):
+                            raw_desc = raw_desc.get("description", str(raw_desc))
+                        raw_desc = str(raw_desc)[:500]
                         await project_registry.upsert_project(
                             name=project_name,
-                            description=specs.get("description", "")[:500],
+                            description=raw_desc,
                             workspace_path=workdir,
                             github_repo=(f"{config.github_owner}/{project_name}" if github_url.startswith("http") else None),
                             deploy_url=deploy_url if deploy_url.startswith("http") else None,
