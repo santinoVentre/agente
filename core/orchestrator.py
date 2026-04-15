@@ -135,6 +135,25 @@ class Orchestrator:
 
         # ── WebDev: project selector or new Q&A session ──────────────────────
         if task_type == TaskType.WEB_DEV and get_session(user_id) is None:
+            # If a web_dev task is already running, don't start a new session
+            try:
+                active_tasks = await task_manager.get_active_tasks()
+                active_webdev = [
+                    t for t in active_tasks
+                    if t.task_type == TaskType.WEB_DEV.value and t.user_id == user_id
+                ]
+                if active_webdev:
+                    tid = active_webdev[0].id
+                    return (
+                        f"⏳ <b>Task #{tid}</b> è già in esecuzione.\n"
+                        "Attendi il completamento prima di avviare un nuovo progetto.\n\n"
+                        "Comandi utili:\n"
+                        f"• /cancel {tid} — annulla il task corrente\n"
+                        "• /status — stato degli agenti"
+                    )
+            except Exception:
+                pass
+
             # Check for existing active projects
             try:
                 active_projects = await project_registry.list_selectable_projects(limit=30)
@@ -499,6 +518,32 @@ class Orchestrator:
             model=model,
         )
 
+        # ── Early project registration (status=building) ─────────────────
+        # Register the project NOW so it appears in the selector while the
+        # pipeline runs.  This prevents the orchestrator from starting a new
+        # Q&A planning session when the user sends follow-up messages.
+        project_name = specs.get("project_name", "")
+        workdir = f"/srv/agent/workspaces/{project_name}" if project_name else ""
+        raw_desc = specs.get("description", "")
+        if isinstance(raw_desc, dict):
+            raw_desc = raw_desc.get("description", str(raw_desc))
+        raw_desc = str(raw_desc)[:500]
+
+        if project_name:
+            try:
+                pm_ctx_early = (state_files or {}).get("pm_context", "")
+                await project_registry.upsert_project(
+                    name=project_name,
+                    description=raw_desc,
+                    workspace_path=workdir,
+                    status="building",
+                    metadata_json={"pm_context": pm_ctx_early[:8000]} if pm_ctx_early else None,
+                )
+                log.info(f"[orchestrator] Project '{project_name}' registered early (building)")
+            except Exception as reg_exc:
+                log.warning(f"[orchestrator] Failed to register project early: {reg_exc}")
+        # ─────────────────────────────────────────────────────────────────
+
         memories = await memory.recall_recent(user_id, limit=5, value_max_chars=200)
         memory_context = memory.format_memories_for_prompt(memories)
         improvement_ctx = await reflection_engine.get_improvement_context(user_id, TaskType.WEB_DEV.value)
@@ -522,11 +567,9 @@ class Orchestrator:
                 await task_manager.complete_task(task.id, cost=cost_tracker.total_cost)
                 await memory.save_message(user_id, "assistant", response, model=model)
 
-                # Register project in registry (pm_context stored in metadata)
-                project_name = specs.get("project_name", "")
+                # Update project in registry with deploy info
                 if project_name:
                     pm_ctx = (state_files or {}).get("pm_context", "")
-                    workdir = f"/srv/agent/workspaces/{project_name}"
                     github_match = re.search(r"<b>GitHub verificato:</b>\s*(https?://\S+|NON verificato.*?)($|\n)", response)
                     deploy_match = re.search(r"<b>Vercel verificato:</b>\s*(https?://\S+|NON verificato.*?)($|\n)", response)
                     verified_match = re.search(r"<b>Deploy verificato:</b>\s*(SI|NO)", response)
@@ -534,11 +577,6 @@ class Orchestrator:
                     deploy_url = deploy_match.group(1).strip() if deploy_match else ""
                     deploy_verified = (verified_match.group(1) == "SI") if verified_match else False
                     try:
-                        # Sanitize description: ensure it's a plain string
-                        raw_desc = specs.get("description", "")
-                        if isinstance(raw_desc, dict):
-                            raw_desc = raw_desc.get("description", str(raw_desc))
-                        raw_desc = str(raw_desc)[:500]
                         await project_registry.upsert_project(
                             name=project_name,
                             description=raw_desc,
@@ -550,9 +588,9 @@ class Orchestrator:
                             metadata_json={"pm_context": pm_ctx[:8000]} if pm_ctx else None,
                             mark_deployed=deploy_verified,
                         )
-                        log.info(f"[orchestrator] Project '{project_name}' registered in registry")
+                        log.info(f"[orchestrator] Project '{project_name}' updated → active")
                     except Exception as reg_exc:
-                        log.warning(f"[orchestrator] Failed to register project: {reg_exc}")
+                        log.warning(f"[orchestrator] Failed to update project: {reg_exc}")
 
                 asyncio.create_task(reflection_engine.analyze_task(
                     user_id=user_id,
@@ -569,6 +607,20 @@ class Orchestrator:
                 duration = time.monotonic() - t0
                 log.error(f"WebDev task #{task.id} failed: {exc}", exc_info=True)
                 await task_manager.fail_task(task.id, str(exc))
+
+                # Mark project as failed so it still shows in the selector
+                if project_name:
+                    try:
+                        await project_registry.upsert_project(
+                            name=project_name,
+                            description=raw_desc,
+                            workspace_path=workdir,
+                            status="failed",
+                        )
+                        log.info(f"[orchestrator] Project '{project_name}' updated → failed")
+                    except Exception:
+                        pass
+
                 asyncio.create_task(reflection_engine.analyze_task(
                     user_id=user_id,
                     task_id=task.id,

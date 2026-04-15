@@ -614,6 +614,26 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
         # Guard: remove any LLM-generated file paths that escape the workspace
         plan = _validate_plan_paths(plan, workdir)
 
+        # ── Clean workspace if building from specs (fresh project) ────────
+        # Old builds may have left contaminating subdirectories (e.g. cloned repos).
+        # Keep .git (if present) but remove everything else for a clean slate.
+        if specs:
+            workdir_path = Path(workdir)
+            if workdir_path.exists():
+                keep = {".git"}
+                for child in workdir_path.iterdir():
+                    if child.name in keep:
+                        continue
+                    try:
+                        if child.is_dir():
+                            import shutil
+                            shutil.rmtree(child)
+                        else:
+                            child.unlink()
+                    except OSError as e:
+                        log.warning(f"[webdev] Failed to clean {child}: {e}")
+                log.info(f"[webdev] Cleaned workspace {workdir} for fresh build")
+
         await notify(
             f"✅ <b>Piano pronto</b>\n"
             f"📦 Progetto: <code>{project_name}</code>\n"
