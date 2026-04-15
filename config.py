@@ -67,6 +67,12 @@ class Config:
     model_code_generation: str = field(default_factory=lambda: _env("MODEL_CODE_GENERATION", "anthropic/claude-sonnet-4-5"))
     model_tool_execution: str = field(default_factory=lambda: _env("MODEL_TOOL_EXECUTION", "google/gemini-2.0-flash-001"))
 
+    # --- WebDev phased model overrides (optional) ---
+    # If empty, WebDev phases fall back to standard routing models.
+    webdev_model_creative_director: str = field(default_factory=lambda: _env("WEBDEV_MODEL_CREATIVE_DIRECTOR", ""))
+    webdev_model_builder: str = field(default_factory=lambda: _env("WEBDEV_MODEL_BUILDER", ""))
+    webdev_model_sweeper: str = field(default_factory=lambda: _env("WEBDEV_MODEL_SWEEPER", ""))
+
     # --- Execution controller ---
     max_steps_per_task: int = field(default_factory=lambda: _env_int("MAX_STEPS_PER_TASK", 8))
     max_tokens_per_task: int = field(default_factory=lambda: _env_int("MAX_TOKENS_PER_TASK", 100_000))
@@ -124,6 +130,9 @@ class Config:
             f"MODEL_AUTONOMOUS={self.model_autonomous}",
             f"MODEL_CODE_GENERATION={self.model_code_generation}",
             f"MODEL_TOOL_EXECUTION={self.model_tool_execution}",
+            f"WEBDEV_MODEL_CREATIVE_DIRECTOR={self.webdev_model_creative_director or '(not set)'}",
+            f"WEBDEV_MODEL_BUILDER={self.webdev_model_builder or '(not set)'}",
+            f"WEBDEV_MODEL_SWEEPER={self.webdev_model_sweeper or '(not set)'}",
             "",
             "--- Execution limits ---",
             f"MAX_STEPS_PER_TASK={self.max_steps_per_task}",

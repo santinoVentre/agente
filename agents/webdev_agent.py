@@ -154,6 +154,40 @@ class WebDevAgent(BaseAgent):
     loop_approval_threshold = 10
     ask_approval_on_loop = True
 
+    def _phase_models(self) -> dict[str, str]:
+        """Resolve model per WebDev role with safe fallbacks."""
+        creative = (config.webdev_model_creative_director or config.model_mid).strip()
+        builder = (config.webdev_model_builder or config.model_mid).strip()
+        sweeper = (config.webdev_model_sweeper or config.model_cheap).strip()
+        return {
+            "creative_director": creative,
+            "builder": builder,
+            "sweeper": sweeper,
+        }
+
+    def _important_review_files(self, files: list[dict]) -> list[str]:
+        """Prioritize key UX pages/components for critique before broad fixes."""
+        paths = [str(f.get("path", "")).strip() for f in files if f.get("path")]
+        if not paths:
+            return []
+
+        priority_patterns = [
+            r"(^|/)src/app/layout\.tsx$",
+            r"(^|/)src/app/page\.tsx$",
+            r"(^|/)pages/index\.",
+            r"(^|/)index\.html$",
+            r"(^|/)(hero|header|navbar|footer|home)\.",
+        ]
+
+        selected: list[str] = []
+        for p in paths:
+            if any(re.search(pattern, p, re.IGNORECASE) for pattern in priority_patterns):
+                selected.append(p)
+
+        if not selected:
+            return paths[:8]
+        return selected[:12]
+
     # ── Pipeline helpers ───────────────────────────────────────────────────────
 
     async def _validate_build(self, workdir: str, task_id: int) -> tuple[bool, str]:
@@ -353,7 +387,12 @@ class WebDevAgent(BaseAgent):
             mark_deployed=bool(verification.get("verified")),
         )
 
-    async def _specs_to_file_plan(self, specs: dict, task_id: int) -> dict:
+    async def _specs_to_file_plan(
+        self,
+        specs: dict,
+        task_id: int,
+        model_override: str | None = None,
+    ) -> dict:
         """Convert Q&A specs into a detailed file plan via LLM."""
         _FILE_PLAN_PROMPT = """\
 Sei un Web Architect. Dato un documento di specifiche di progetto, genera SOLO un JSON con la lista
@@ -387,6 +426,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             task_type=TaskType.COMPLEX_REASONING,
             temperature=0.15,
             max_tokens=2048,
+            model_override=model_override,
         )
         try:
             plan = _extract_json_object(plan_raw)
@@ -413,9 +453,10 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
         task_type: TaskType = TaskType.CODE_GENERATION,
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        model_override: str | None = None,
     ) -> str:
         """Single non-tool LLM call for planner/reviewer steps."""
-        model = get_model_for_task(task_type)
+        model = model_override or get_model_for_task(task_type)
         response = await openrouter.chat(
             model=model,
             messages=[
@@ -436,15 +477,17 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
         task_id: int,
         task_type: TaskType = TaskType.CODE_GENERATION,
         progress: int = 0,
+        model_override: str | None = None,
     ) -> str:
         """Run a tool-using phase (builder / deployer) with full BaseAgent loop."""
         await notify(f"🔧 <b>WebDev</b> — fase <b>{phase_name}</b> avviata")
         await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=progress)
+        selected_model = model_override or get_model_for_task(task_type)
         return await super().run(
             user_message=user_content,
             task_id=task_id,
             system_prompt=system_prompt,
-            model_override=get_model_for_task(task_type),
+            model_override=selected_model,
         )
 
     def _files_to_xml_tasks(self, files: list[dict], workdir: str, wave: int) -> str:
@@ -473,6 +516,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
         workdir: str,
         task_id: int,
         state_files: dict,
+        builder_model: str | None = None,
     ) -> str:
         """Execute the build phase wave by wave.
 
@@ -551,6 +595,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
                 task_id=task_id,
                 task_type=TaskType.CODE_GENERATION,
                 progress=wave_progress,
+                model_override=builder_model,
             )
             results.append(f"[Wave {wave_num}] {result[:300]}")
 
@@ -581,13 +626,25 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
         state_files: dict | None = None,
     ) -> str:
 
+        models = self._phase_models()
+        await notify(
+            "🧠 <b>WebDev model stack</b>\n"
+            f"Creative Director: <code>{models['creative_director']}</code>\n"
+            f"Builder: <code>{models['builder']}</code>\n"
+            f"Sweeper: <code>{models['sweeper']}</code>"
+        )
+
         # ── FASE 1: PLANNER ──────────────────────────────────────────────────
         await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=5)
 
         if specs:
             # Specs already provided by the Q&A planner — skip LLM planner
             await notify("🗺️ <b>WebDev</b> — <b>FASE 1/4</b>: Specifiche già pronte, generazione file list…")
-            plan = await self._specs_to_file_plan(specs, task_id)
+            plan = await self._specs_to_file_plan(
+                specs,
+                task_id,
+                model_override=models["creative_director"],
+            )
         else:
             # No specs: fall back to LLM-based planning from raw message
             await notify("🗺️ <b>WebDev</b> — <b>FASE 1/4</b>: Pianificazione architettura…")
@@ -598,6 +655,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
                 task_type=TaskType.COMPLEX_REASONING,
                 temperature=0.2,
                 max_tokens=2048,
+                model_override=models["creative_director"],
             )
             try:
                 json_start = plan_raw.find("{")
@@ -676,16 +734,21 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             workdir=workdir,
             task_id=task_id,
             state_files=state_files or {},
+            builder_model=models["builder"],
         )
 
         # ── FASE 3: REVIEWER ────────────────────────────────────────────────
         await notify("🔍 <b>WebDev</b> — <b>FASE 3/4</b>: Code review e fix…")
         await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=60)
 
+        important_files = self._important_review_files(plan.get("files", []))
         reviewer_context = (
             f"Progetto: {project_name} ({tech_stack})\n"
             f"Directory: {workdir}\n"
             f"File attesi: {json.dumps([f['path'] for f in plan.get('files', [])], ensure_ascii=False)}\n\n"
+            f"File prioritari per critica design/UX: {json.dumps(important_files, ensure_ascii=False)}\n"
+            "Prima fai critica e refinement sui file prioritari (struttura pagina, gerarchia visiva, tipografia, spacing, responsive).\n"
+            "Poi estendi i fix al resto del progetto solo se necessario.\n\n"
             f"Controlla esplicitamente package.json, lockfile e requirements.* contro versioni correnti. "
             f"Aggiorna dipendenze obsolete a release stabili recenti e poi restituisci un report.\n"
             f"{_WEB_STACK_POLICY}"
@@ -698,6 +761,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             task_id=task_id,
             task_type=TaskType.CODE_REVIEW,
             progress=60,
+            model_override=models["creative_director"],
         )
 
         # ── FASE 3b: BUILD VALIDATION ───────────────────────────────────────
@@ -724,6 +788,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
                 task_id=task_id,
                 task_type=TaskType.CODE_FIX,
                 progress=70,
+                model_override=models["sweeper"],
             )
             # Re-validate after fix attempt
             build_ok_2, build_report_2 = await self._validate_build(workdir, task_id)
