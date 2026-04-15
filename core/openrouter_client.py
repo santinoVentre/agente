@@ -37,6 +37,39 @@ class OpenRouterClient:
             )
         return self._client
 
+    @staticmethod
+    def _sanitize_tool_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Remove orphaned tool-result messages that lack a preceding tool_use.
+
+        Anthropic strictly requires every tool_result to reference a tool_use_id
+        present in the immediately preceding assistant message.  After context
+        compression or model escalation this invariant can be broken.  This
+        method drops any tool message whose tool_call_id is not found in an
+        earlier assistant message's tool_calls list.
+        """
+        # Collect all tool_use ids from assistant messages
+        valid_tc_ids: set[str] = set()
+        for m in messages:
+            if m.get("role") == "assistant":
+                for tc in m.get("tool_calls") or []:
+                    tc_id = tc.get("id")
+                    if tc_id:
+                        valid_tc_ids.add(tc_id)
+
+        cleaned: list[dict[str, Any]] = []
+        dropped = 0
+        for m in messages:
+            if m.get("role") == "tool":
+                tc_id = m.get("tool_call_id")
+                if tc_id and tc_id not in valid_tc_ids:
+                    dropped += 1
+                    continue
+            cleaned.append(m)
+
+        if dropped:
+            log.warning("Dropped %d orphaned tool-result message(s) before API call", dropped)
+        return cleaned
+
     async def chat(
         self,
         model: str,
@@ -49,6 +82,7 @@ class OpenRouterClient:
         task_id: int | None = None,
     ) -> dict[str, Any]:
         """Non-streaming chat completion. Returns the full response dict."""
+        messages = self._sanitize_tool_messages(messages)
         client = await self._get_client()
         payload: dict[str, Any] = {
             "model": model,

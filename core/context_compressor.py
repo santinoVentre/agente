@@ -1,4 +1,4 @@
-"""Context compressor — keeps last 2 turns + a compressed summary to minimise token usage.
+"""Context compressor — keeps recent turns + a compressed summary to minimise token usage.
 
 Called by BaseAgent every SUMMARY_INTERVAL steps.
 Always uses the CHEAP model so compression itself costs almost nothing.
@@ -21,16 +21,47 @@ _COMPRESS_SYSTEM = (
 _MIN_MESSAGES_TO_COMPRESS = 3  # need at least 3 conv turns before it's worth compressing
 
 
+def _find_safe_split(rest: list[dict], keep_recent: int = 2) -> int:
+    """Find a safe split index so we never orphan tool_use/tool_result pairs.
+
+    Returns the index in `rest` where the "keep" portion starts.
+    The split point is moved earlier if cutting at -keep_recent would orphan
+    a tool result (i.e. separate it from its preceding assistant+tool_calls).
+    """
+    if len(rest) <= keep_recent:
+        return 0
+
+    split = len(rest) - keep_recent
+
+    # Walk backwards from split: if the message at `split` is a tool result,
+    # its assistant (with tool_calls) must be somewhere before split.
+    # We need to include the full tool-call block in the kept portion.
+    while split > 0 and rest[split]["role"] == "tool":
+        split -= 1
+
+    # Also check: if the message at split is an assistant with tool_calls,
+    # the tool results after it must all be in the kept portion too.
+    if split > 0 and split < len(rest):
+        msg = rest[split - 1]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            # The assistant with tool_calls is in the "to_compress" section,
+            # but its tool_results might start at split — include the assistant too
+            split -= 1
+
+    return max(split, 0)
+
+
 async def compress_messages(
     messages: list[dict],
     task_id: int | None = None,
 ) -> list[dict]:
     """
-    Given the current message list, compress all conversation turns except the last 2
+    Given the current message list, compress older conversation turns
     into a single [CONTEXT SUMMARY] system message.
 
     System messages that were already summaries are included in what gets compressed.
     Always keeps the original system prompt (first message if role==system) intact.
+    Never splits assistant(tool_calls) from their tool(result) messages.
     Uses the cheap model — typically < 0.001 USD per compression.
     """
     if not messages:
@@ -52,9 +83,11 @@ async def compress_messages(
     if len(conv_turns) < _MIN_MESSAGES_TO_COMPRESS:
         return messages
 
-    # Split: everything except the last 2 turns → compress; last 2 → keep
-    to_compress = rest[:-2]
-    keep_recent = rest[-2:]
+    # Find safe split point that doesn't orphan tool pairs
+    split_idx = _find_safe_split(rest, keep_recent=2)
+
+    to_compress = rest[:split_idx]
+    keep_recent = rest[split_idx:]
 
     if not to_compress:
         return messages
