@@ -399,7 +399,8 @@ async def _generate_specs(initial_message: str, answers: dict) -> dict:
         temperature=0.2,
         max_tokens=2048,
     )
-    raw = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    raw = (response.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    raw = raw.strip()
 
     try:
         js = raw[raw.find("{"):raw.rfind("}") + 1]
@@ -491,7 +492,8 @@ async def _generate_pm_context(
         temperature=0.2,
         max_tokens=2000,
     )
-    raw = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    raw = (response.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    raw = raw.strip()
     if not raw:
         # Minimal fallback
         cp = design_system.get("color_palette", {})
@@ -527,11 +529,12 @@ async def _generate_state_files(specs: dict, answers: dict) -> tuple[str, str]:
         temperature=0.2,
         max_tokens=1200,
     )
-    raw = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    raw = (response.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    raw = raw.strip()
     try:
         js = raw[raw.find("{"):raw.rfind("}") + 1]
         data = json.loads(js)
-        return data.get("project_md", ""), data.get("requirements_md", "")
+        return data.get("project_md") or "", data.get("requirements_md") or ""
     except (json.JSONDecodeError, ValueError):
         log.warning(f"[webdev_planner] State files non-JSON: {raw[:200]}")
         project_md = (
@@ -572,7 +575,8 @@ async def _generate_design_system(specs: dict, answers: dict) -> dict:
         temperature=0.4,
         max_tokens=1200,
     )
-    raw = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    raw = (response.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    raw = raw.strip()
 
     try:
         js = raw[raw.find("{"):raw.rfind("}") + 1]
@@ -617,7 +621,7 @@ async def analyze_inspiration_image(image_path: str) -> str:
             temperature=0.1,
             max_tokens=400,
         )
-        return response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        return (response.get("choices") or [{}])[0].get("message", {}).get("content") or ""
     except Exception as exc:
         log.warning(f"[webdev_planner] Image analysis failed for {image_path}: {exc}")
         return ""

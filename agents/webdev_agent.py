@@ -305,7 +305,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             max_tokens=max_tokens,
             task_id=task_id,
         )
-        return response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        return ((response.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
 
     async def _run_phase(
         self,

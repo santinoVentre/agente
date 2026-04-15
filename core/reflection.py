@@ -167,7 +167,7 @@ class ReflectionEngine:
             temperature=0.2,
             max_tokens=512,
         )
-        raw = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        raw = ((response.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
 
         try:
             js = raw[raw.find("{"):raw.rfind("}") + 1]
@@ -226,7 +226,7 @@ class ReflectionEngine:
             temperature=0.1,
             max_tokens=512,
         )
-        raw = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        raw = ((response.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
 
         try:
             js = raw[raw.find("{"):raw.rfind("}") + 1]

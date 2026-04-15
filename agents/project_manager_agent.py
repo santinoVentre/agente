@@ -470,7 +470,7 @@ class ProjectManagerAgent(BaseAgent):
             max_tokens=220,
             task_id=task_id,
         )
-        rewritten = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        rewritten = ((response.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
         return rewritten or (
             "Ho generato un output interno non adatto alla chat. "
             "In questo momento non posso confermare che il deploy sia stato eseguito correttamente. "

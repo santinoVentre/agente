@@ -75,7 +75,7 @@ class Orchestrator:
             temperature=0.0,
             max_tokens=20,
         )
-        raw = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip().lower()
+        raw = ((response.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip().lower()
 
         # Map string to TaskType
         mapping = {t.value: t for t in TaskType}

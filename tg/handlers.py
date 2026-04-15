@@ -911,7 +911,7 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 # Override the initial message with file content
                 session.initial_message = content[:3000]
                 # Skip remaining questions and finalize immediately
-                session.current_question_idx = len(session.answers)  # mark done
+                session.current_question_idx = len(PLANNING_QUESTIONS)  # mark all done
                 # Fill remaining answers as "vedi file specs"
                 from core.webdev_planner import PLANNING_QUESTIONS
                 for q in PLANNING_QUESTIONS:
