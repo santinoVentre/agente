@@ -88,6 +88,14 @@ class OpenRouterClient:
 
     async def _post_and_parse(self, client: httpx.AsyncClient, payload: dict[str, Any]) -> dict[str, Any]:
         resp = await client.post("/chat/completions", json=payload)
+        if resp.status_code >= 400:
+            body_preview = resp.text[:1500]
+            log.error(
+                "OpenRouter HTTP %d for model %s — body: %s",
+                resp.status_code,
+                payload.get("model"),
+                body_preview,
+            )
         resp.raise_for_status()
         try:
             data = resp.json()
@@ -163,7 +171,20 @@ class OpenRouterClient:
         for attempt in range(max_retries):
             try:
                 return await self._request_once(client, payload)
-            except (httpx.HTTPStatusError, httpx.RequestError, json.JSONDecodeError) as e:
+            except httpx.HTTPStatusError as e:
+                last_err = e
+                status = e.response.status_code
+                log.warning(f"OpenRouter request failed (attempt {attempt+1}/{max_retries}): HTTP {status}")
+                # 4xx = client error (bad model name, invalid payload) — retry won't help
+                if 400 <= status < 500:
+                    raise RuntimeError(
+                        f"OpenRouter client error {status} for model {payload.get('model')}: "
+                        f"{e.response.text[:500]}"
+                    )
+                if attempt < max_retries - 1:
+                    import asyncio
+                    await asyncio.sleep(2 ** attempt)
+            except (httpx.RequestError, json.JSONDecodeError) as e:
                 last_err = e
                 log.warning(f"OpenRouter request failed (attempt {attempt+1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:

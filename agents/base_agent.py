@@ -491,6 +491,8 @@ class BaseAgent:
                                     f"{model} → {escalated} after {consecutive_tool_errors} errors"
                                 )
                                 model = escalated
+                            # Reset counter to avoid repeated escalation attempts
+                            consecutive_tool_errors = 0
                     else:
                         consecutive_tool_successes += 1
                         consecutive_tool_errors = 0

@@ -27,6 +27,21 @@ from utils.logging import setup_logging
 
 log = setup_logging("webdev_planner")
 
+
+def _extract_json_object(raw: str) -> dict | None:
+    """Extract a JSON object from LLM output, stripping markdown code fences and tolerating noise."""
+    # Strip markdown code fences
+    cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(cleaned[start:end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
 # ── Question bank ──────────────────────────────────────────────────────────
 
 PLANNING_QUESTIONS: list[dict] = [
@@ -498,13 +513,12 @@ async def _generate_specs(initial_message: str, answers: dict) -> dict:
     raw = (response.get("choices") or [{}])[0].get("message", {}).get("content") or ""
     raw = raw.strip()
 
-    try:
-        js = raw[raw.find("{"):raw.rfind("}") + 1]
-        return json.loads(js)
-    except (json.JSONDecodeError, ValueError):
-        log.warning(f"[webdev_planner] Specs non-JSON: {raw[:200]}")
-        return {
-            "project_name": "progetto-web",
+    parsed = _extract_json_object(raw)
+    if parsed is not None:
+        return parsed
+    log.warning(f"[webdev_planner] Specs non-JSON: {raw[:200]}")
+    return {
+        "project_name": "progetto-web",
             "description": initial_message,
             "tech_stack": "Next.js 15 + React 19 + Tailwind CSS 4 + TypeScript 5 + Node 22 LTS",
             "pages": [{"name": "Home", "slug": "/", "sections": ["hero", "cta"]}],
@@ -627,24 +641,22 @@ async def _generate_state_files(specs: dict, answers: dict) -> tuple[str, str]:
     )
     raw = (response.get("choices") or [{}])[0].get("message", {}).get("content") or ""
     raw = raw.strip()
-    try:
-        js = raw[raw.find("{"):raw.rfind("}") + 1]
-        data = json.loads(js)
-        return data.get("project_md") or "", data.get("requirements_md") or ""
-    except (json.JSONDecodeError, ValueError):
-        log.warning(f"[webdev_planner] State files non-JSON: {raw[:200]}")
-        project_md = (
-            f"# {specs.get('business_name', specs.get('project_name', 'Progetto'))}\n\n"
-            f"{specs.get('description', '')}\n\n"
-            f"**Stack:** {specs.get('tech_stack', '')}\n"
-            f"**Target:** {specs.get('target_audience', '')}\n"
-            f"**Tone:** {specs.get('tone_of_voice', '')}"
-        )
-        requirements_md = (
-            "# Requirements\n\n## v1 — Must Have\n"
-            + "\n".join(f"- {f}" for f in specs.get("features", []))
-        )
-        return project_md, requirements_md
+    parsed = _extract_json_object(raw)
+    if parsed is not None:
+        return parsed.get("project_md") or "", parsed.get("requirements_md") or ""
+    log.warning(f"[webdev_planner] State files non-JSON: {raw[:200]}")
+    project_md = (
+        f"# {specs.get('business_name', specs.get('project_name', 'Progetto'))}\n\n"
+        f"{specs.get('description', '')}\n\n"
+        f"**Stack:** {specs.get('tech_stack', '')}\n"
+        f"**Target:** {specs.get('target_audience', '')}\n"
+        f"**Tone:** {specs.get('tone_of_voice', '')}"
+    )
+    requirements_md = (
+        "# Requirements\n\n## v1 — Must Have\n"
+        + "\n".join(f"- {f}" for f in specs.get("features", []))
+    )
+    return project_md, requirements_md
 
 
 async def _generate_design_system(specs: dict, answers: dict) -> dict:
@@ -674,12 +686,11 @@ async def _generate_design_system(specs: dict, answers: dict) -> dict:
     raw = (response.get("choices") or [{}])[0].get("message", {}).get("content") or ""
     raw = raw.strip()
 
-    try:
-        js = raw[raw.find("{"):raw.rfind("}") + 1]
-        return json.loads(js)
-    except (json.JSONDecodeError, ValueError):
-        log.warning(f"[webdev_planner] Design system non-JSON: {raw[:200]}")
-        return {}
+    parsed = _extract_json_object(raw)
+    if parsed is not None:
+        return parsed
+    log.warning(f"[webdev_planner] Design system non-JSON: {raw[:200]}")
+    return {}
 
 
 async def analyze_inspiration_image(image_path: str) -> str:

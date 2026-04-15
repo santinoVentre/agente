@@ -11,7 +11,7 @@ from core.model_router import TaskType, get_model_for_task
 from core.openrouter_client import openrouter
 from core.project_registry import project_registry
 from core.task_manager import task_manager
-from core.webdev_planner import build_design_system_prompt_section
+from core.webdev_planner import build_design_system_prompt_section, _extract_json_object
 from db.models import TaskStatus
 from tg.notifications import notify
 from agents.base_agent import BaseAgent
@@ -389,8 +389,9 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             max_tokens=2048,
         )
         try:
-            js = plan_raw[plan_raw.find("{"):plan_raw.rfind("}") + 1]
-            plan = json.loads(js)
+            plan = _extract_json_object(plan_raw)
+            if plan is None:
+                raise ValueError("No JSON object found")
             # Merge specs data into plan
             plan.setdefault("project_name", specs.get("project_name", "progetto-web"))
             plan.setdefault("tech_stack", specs.get("tech_stack", "Next.js 15 + React 19 + Tailwind CSS 4 + TypeScript 5 + Node 22 LTS"))
