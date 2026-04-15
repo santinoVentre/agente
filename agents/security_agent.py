@@ -27,6 +27,13 @@ _SHELL_BLOCKLIST = [
     r"iptables\s+-F",
 ]
 
+# Trusted curl|bash patterns allowed through the blocklist above
+_TRUSTED_CURL_BASH: list[re.Pattern] = [
+    re.compile(r"curl\s+\S*https://raw\.githubusercontent\.com/nvm-sh/nvm/", re.IGNORECASE),
+    re.compile(r"curl\s+\S*https://deb\.nodesource\.com/setup_\d+\.x", re.IGNORECASE),
+    re.compile(r"curl\s+\S*https://get\.docker\.com", re.IGNORECASE),
+]
+
 # Whitelisted sudo commands — regex-anchored to prevent prefix-bypass attacks
 _SUDO_REGEX_WHITELIST: list[re.Pattern] = [
     re.compile(r"^sudo\s+apt(?:-get)?\s+(update|install\s+-y)\b"),
@@ -161,6 +168,9 @@ class SecurityAgent:
 
         for pattern in _SHELL_BLOCKLIST:
             if re.search(pattern, command, re.IGNORECASE):
+                # Allow trusted installer scripts through curl|bash block
+                if "curl" in pattern and any(tp.search(command) for tp in _TRUSTED_CURL_BASH):
+                    continue
                 return RiskLevel.CRITICAL, f"Blocked pattern detected: {pattern}"
 
         # Check for protected system paths
