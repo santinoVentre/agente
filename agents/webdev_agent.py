@@ -132,11 +132,12 @@ Sei un DevOps Engineer. Il tuo compito è pubblicare il progetto:
 
 1. Valida prima le integrazioni con `github(action=validate_auth)` e `vercel(action=validate_auth)`
 2. Crea o riusa il repository GitHub con `github(action=create_repo)`
-3. Pusha TUTTA la workspace con una sola chiamata `github(action=push_directory, source_dir=...)`
+3. Pusha TUTTA la workspace con `github(action=git_push, source_dir=..., repo_name=...)` — usa SEMPRE git_push, NON push_directory
 4. Crea o riusa il progetto Vercel con `vercel(action=deploy_from_github)`
 5. Verifica che esista una deployment reale e restituisci l'URL effettivo
 6. Restituisci l'URL pubblico del sito
 
+IMPORTANTE: usa `git_push` (Git CLI, veloce, singolo commit) invece di `push_directory` (REST API, lento, multi-commit).
 Se GitHub push o Vercel deploy falliscono, spiega il motivo reale ricevuto dal tool e NON dichiarare successo.
 Usa i tool github e vercel disponibili. Rispondi in italiano."""
 
@@ -154,6 +155,125 @@ class WebDevAgent(BaseAgent):
     ask_approval_on_loop = True
 
     # ── Pipeline helpers ───────────────────────────────────────────────────────
+
+    async def _validate_build(self, workdir: str, task_id: int) -> tuple[bool, str]:
+        """Run npm install + npm run build in the project workspace.
+
+        Returns (success: bool, report: str).
+        """
+        # Step 1: npm install
+        install_result = await self.execute_tool(
+            "shell",
+            {"command": "cd " + workdir + " && npm install --prefer-offline 2>&1", "timeout": 120, "cwd": workdir},
+            task_id,
+        )
+        if not install_result.get("success"):
+            stderr = install_result.get("stderr", "") or install_result.get("error", "")
+            stdout = install_result.get("stdout", "")
+            return False, f"npm install failed:\n{stderr}\n{stdout}"
+
+        # Step 2: npm run build
+        build_result = await self.execute_tool(
+            "shell",
+            {"command": "cd " + workdir + " && npm run build 2>&1", "timeout": 180, "cwd": workdir},
+            task_id,
+        )
+        if not build_result.get("success"):
+            stderr = build_result.get("stderr", "") or build_result.get("error", "")
+            stdout = build_result.get("stdout", "")
+            return False, f"npm run build failed:\n{stderr[-2000:]}\n{stdout[-2000:]}"
+
+        return True, "Build succeeded."
+
+    async def _health_check_url(self, url: str, task_id: int) -> dict:
+        """Verify a deployed URL responds with HTTP 200."""
+        if not url or url == "-":
+            return {"healthy": False, "reason": "No URL provided"}
+        result = await self.execute_tool(
+            "shell",
+            {"command": f"curl -sS -o /dev/null -w '%{{http_code}}' --max-time 15 '{url}'", "timeout": 20},
+            task_id,
+        )
+        if result.get("success"):
+            status_code = (result.get("stdout") or "").strip()
+            healthy = status_code in ("200", "301", "302", "308")
+            return {"healthy": healthy, "status_code": status_code, "url": url}
+        return {"healthy": False, "reason": result.get("error", "Request failed"), "url": url}
+
+    async def _preview_screenshot(self, workdir: str, task_id: int) -> str | None:
+        """Start a local dev server, take a screenshot, send to Telegram, stop server.
+
+        Returns the screenshot path on success, None on failure.
+        """
+        import asyncio as _asyncio
+
+        screenshot_path = f"/srv/agent/media/preview_{task_id}.png"
+
+        # Start dev server in background
+        server_result = await self.execute_tool(
+            "shell",
+            {
+                "command": f"cd {workdir} && npx next start -p 3199 &\necho 'DEV_SERVER_PID='$!",
+                "timeout": 10,
+                "cwd": workdir,
+            },
+            task_id,
+        )
+        # Extract PID
+        server_pid = ""
+        stdout = server_result.get("stdout", "")
+        for line in stdout.split("\n"):
+            if "DEV_SERVER_PID=" in line:
+                server_pid = line.split("=")[1].strip()
+                break
+
+        try:
+            # Wait for server to be ready
+            await _asyncio.sleep(5)
+
+            # Take screenshot
+            screenshot_result = await self.execute_tool(
+                "browser",
+                {
+                    "action": "screenshot",
+                    "url": "http://localhost:3199",
+                    "save_path": screenshot_path,
+                },
+                task_id,
+            )
+            if not screenshot_result.get("success"):
+                log.warning(f"[webdev] Screenshot failed: {screenshot_result.get('error')}")
+                return None
+
+            # Send to Telegram
+            await self.execute_tool(
+                "telegram",
+                {
+                    "action": "send_photo",
+                    "file_path": screenshot_path,
+                    "caption": "📸 Anteprima del sito prima del deploy",
+                },
+                task_id,
+            )
+            return screenshot_path
+
+        except Exception as e:
+            log.warning(f"[webdev] Preview screenshot failed: {e}")
+            return None
+        finally:
+            # Kill the dev server
+            if server_pid:
+                await self.execute_tool(
+                    "shell",
+                    {"command": f"kill {server_pid} 2>/dev/null || true", "timeout": 5},
+                    task_id,
+                )
+            # Also kill anything on port 3199 as safety net
+            await self.execute_tool(
+                "shell",
+                {"command": "fuser -k 3199/tcp 2>/dev/null || true", "timeout": 5},
+                task_id,
+            )
 
     async def _verify_publish(self, project_name: str, task_id: int) -> dict:
         """Verify GitHub repo and Vercel deployment with real tool calls."""
@@ -559,13 +679,62 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             progress=60,
         )
 
+        # ── FASE 3b: BUILD VALIDATION ───────────────────────────────────────
+        build_ok, build_report = await self._validate_build(workdir, task_id)
+        if not build_ok:
+            await notify(
+                f"⚠️ <b>Build fallita</b> per <code>{project_name}</code>\n\n"
+                f"<code>{build_report[:600]}</code>\n\n"
+                "Tentativo di fix automatico…"
+            )
+            # Let the reviewer fix the build errors
+            fix_context = (
+                f"Progetto: {project_name} ({tech_stack})\n"
+                f"Directory: {workdir}\n\n"
+                f"Il build (`npm run build`) è FALLITO con questi errori:\n"
+                f"```\n{build_report}\n```\n\n"
+                f"Leggi i file coinvolti, correggi gli errori e verifica che il build passi.\n"
+                f"Esegui `cd {workdir} && npm run build` alla fine per confermare il fix."
+            )
+            await self._run_phase(
+                phase_name="Build Fix",
+                system_prompt=_REVIEWER_PROMPT,
+                user_content=fix_context,
+                task_id=task_id,
+                task_type=TaskType.CODE_FIX,
+                progress=70,
+            )
+            # Re-validate after fix attempt
+            build_ok_2, build_report_2 = await self._validate_build(workdir, task_id)
+            if not build_ok_2:
+                await notify(
+                    f"🛑 <b>Build ancora fallita</b> dopo il fix.\n"
+                    f"<code>{build_report_2[:400]}</code>\n\n"
+                    "Puoi comunque approvare il deploy (potrebbe funzionare su Vercel)."
+                )
+                build_report = build_report_2
+            else:
+                build_report = "✅ Build riuscita dopo fix automatico."
+                await notify("✅ Build riuscita dopo fix automatico!")
+        else:
+            await notify("✅ Build locale superata con successo!")
+
+        # ── PREVIEW SCREENSHOT ────────────────────────────────────────────────
+        if build_ok:
+            await notify("📸 <b>WebDev</b> — Generazione anteprima sito…")
+            preview_path = await self._preview_screenshot(workdir, task_id)
+            if not preview_path:
+                log.info("[webdev] Preview screenshot skipped or failed")
+
         # ── GATE: approvazione deploy ────────────────────────────────────────
+        build_label = "✅ Superata" if build_ok else "⚠️ Fallita (vedi sopra)"
         deploy_approved = await self._request_user_approval(
             task_id,
             f"🚀 <b>Pronto per il deployment</b>\n\n"
             f"📦 Progetto: <code>{project_name}</code>\n"
             f"🛠️ Stack: {tech_stack}\n"
-            f"📄 {len(plan.get('files', []))} file generati e revisionati\n\n"
+            f"📄 {len(plan.get('files', []))} file generati e revisionati\n"
+            f"🔨 Build locale: {build_label}\n\n"
             "Confermo il push su <b>GitHub</b> e il deploy su <b>Vercel</b>?",
             timeout=600.0,
             progress=78,
@@ -602,6 +771,13 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
         )
 
         verification = await self._verify_publish(project_name, task_id)
+
+        # Health check: verify the deployed site actually responds
+        health = {"healthy": False, "reason": "no URL"}
+        deploy_url = verification.get("deploy_url", "")
+        if deploy_url and deploy_url != "-":
+            health = await self._health_check_url(deploy_url, task_id)
+
         await self._persist_project_status(
             project_name=project_name,
             description=plan.get("description", ""),
@@ -619,6 +795,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             f"NON verificato ({verification.get('vercel_error') or 'deployment ready non trovata'})"
         )
         deploy_verification_label = "SI" if verification.get("verified") else "NO"
+        health_label = f"✅ HTTP {health.get('status_code', '?')}" if health.get("healthy") else f"❌ {health.get('reason', health.get('status_code', 'non raggiungibile'))}"
         return (
             f"✅ <b>Progetto completato: {project_name}</b>\n\n"
             f"🛠️ Stack: {tech_stack}\n\n"
@@ -627,6 +804,7 @@ Includi TUTTI i file necessari. Non omettere nulla. Sii preciso."""
             f"<b>Deploy verificato:</b> {deploy_verification_label}\n"
             f"<b>GitHub verificato:</b> {github_status}\n"
             f"<b>Vercel verificato:</b> {deploy_status}\n"
-            f"<b>Stato deployment:</b> {verification.get('deploy_state', 'missing')}\n\n"
+            f"<b>Stato deployment:</b> {verification.get('deploy_state', 'missing')}\n"
+            f"<b>Health check:</b> {health_label}\n\n"
             f"💰 Costo totale task: ${task_cost:.3f}"
         )

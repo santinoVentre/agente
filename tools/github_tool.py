@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 from typing import Any
@@ -159,8 +160,8 @@ class GitHubTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["validate_auth", "create_repo", "push_file", "push_directory", "list_repos", "delete_repo", "get_repo"],
-                    "description": "GitHub action to perform.",
+                    "enum": ["validate_auth", "create_repo", "push_file", "push_directory", "git_push", "list_repos", "delete_repo", "get_repo"],
+                    "description": "GitHub action to perform. Prefer 'git_push' over 'push_directory' for speed.",
                 },
                 "owner": {"type": "string", "description": "GitHub owner/org. Defaults to configured owner."},
                 "repo_name": {"type": "string", "description": "Repository name."},
@@ -168,7 +169,7 @@ class GitHubTool(BaseTool):
                 "private": {"type": "boolean", "description": "Whether the repo is private.", "default": True},
                 "file_path": {"type": "string", "description": "Path within the repo (for push_file)."},
                 "content": {"type": "string", "description": "File content (for push_file)."},
-                "source_dir": {"type": "string", "description": "Absolute directory to sync to the repo (for push_directory)."},
+                "source_dir": {"type": "string", "description": "Absolute directory to push (for push_directory / git_push)."},
                 "commit_message": {"type": "string", "description": "Commit message.", "default": "Update via agent"},
                 "branch": {"type": "string", "description": "Branch name. Defaults to the repo default branch."},
             },
@@ -285,6 +286,92 @@ class GitHubTool(BaseTool):
                             f"(pushed={pushed}, skipped={skipped}, failed={len(failures)})"
                         ),
                     }
+
+                elif action == "git_push":
+                    # Fast Git CLI push — single commit, much faster than REST API
+                    owner = self._owner(kwargs)
+                    repo = kwargs.get("repo_name")
+                    source_dir_str = kwargs.get("source_dir")
+                    if not repo or not source_dir_str:
+                        return {"success": False, "error": "Missing required parameter(s): repo_name, source_dir.", "failure_kind": "invalid_args"}
+
+                    source_dir = Path(source_dir_str).resolve()
+                    if not source_dir.exists() or not source_dir.is_dir():
+                        return {"success": False, "error": f"Source directory not found: {source_dir}", "failure_kind": "not_found"}
+
+                    # Ensure repo exists via API first
+                    await self._ensure_repo(
+                        client=client,
+                        repo_name=repo,
+                        description=kwargs.get("description", ""),
+                        private=kwargs.get("private", True),
+                        owner=owner,
+                    )
+                    branch = kwargs.get("branch") or "main"
+                    commit_msg = kwargs.get("commit_message", "Update via agent")
+                    remote_url = f"https://x-access-token:{config.github_token}@github.com/{owner}/{repo}.git"
+
+                    # Build a shell script to init, add, commit, push
+                    # Use -C to avoid cd issues; configure git to avoid identity prompts
+                    git_script = (
+                        f'cd "{source_dir}" && '
+                        f'git init -b {branch} && '
+                        f'git config user.email "agent@automated.dev" && '
+                        f'git config user.name "Agent" && '
+                        f'git add -A && '
+                        f'git commit -m "{commit_msg}" --allow-empty && '
+                        f'git remote remove origin 2>/dev/null; '
+                        f'git remote add origin "{remote_url}" && '
+                        f'git push -u origin {branch} --force'
+                    )
+
+                    try:
+                        import shutil
+                        bash_path = shutil.which("bash")
+                        if bash_path:
+                            proc = await asyncio.create_subprocess_exec(
+                                bash_path, "-lc", git_script,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                                cwd=str(source_dir),
+                            )
+                        else:
+                            proc = await asyncio.create_subprocess_shell(
+                                git_script,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                                cwd=str(source_dir),
+                            )
+                        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                            proc.communicate(), timeout=120
+                        )
+                        stdout_text = stdout_bytes.decode("utf-8", errors="replace")[:5000]
+                        stderr_text = stderr_bytes.decode("utf-8", errors="replace")[:5000]
+                        # Sanitize: remove token from any error output
+                        stderr_text = stderr_text.replace(config.github_token, "***")
+                        stdout_text = stdout_text.replace(config.github_token, "***")
+
+                        if proc.returncode != 0:
+                            return {
+                                "success": False,
+                                "error": f"git push failed (exit {proc.returncode}): {stderr_text}",
+                                "stdout": stdout_text,
+                                "failure_kind": "runtime_error",
+                            }
+
+                        return {
+                            "success": True,
+                            "owner": owner,
+                            "repo": repo,
+                            "branch": branch,
+                            "message": f"Git pushed {source_dir} to {owner}/{repo} ({branch})",
+                            "stdout": stdout_text,
+                        }
+                    except asyncio.TimeoutError:
+                        return {"success": False, "error": "git push timed out after 120s", "failure_kind": "timeout"}
+                    except Exception as exc:
+                        error_msg = str(exc).replace(config.github_token, "***")
+                        return {"success": False, "error": error_msg, "failure_kind": "runtime_error"}
 
                 elif action == "list_repos":
                     resp = await client.get(f"{GITHUB_API}/user/repos", params={"per_page": 50, "sort": "updated"})

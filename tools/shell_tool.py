@@ -6,6 +6,7 @@ import asyncio
 import os
 import shlex
 import shutil
+from pathlib import Path
 from typing import Any
 
 from config import config
@@ -14,6 +15,15 @@ from tools.base_tool import BaseTool
 from utils.logging import setup_logging
 
 log = setup_logging("tool_shell")
+
+# Allowed working directories for shell commands
+_ALLOWED_CWD_ROOTS = [
+    "/srv/agent/workspaces",
+    "/srv/agent/media",
+    "/srv/agent/app",
+    "/srv/agent/logs",
+    "/tmp",
+]
 
 # Commands that always require approval
 _DANGEROUS_PATTERNS = [
@@ -73,6 +83,22 @@ class ShellTool(BaseTool):
         command: str = kwargs["command"]
         timeout: int = min(kwargs.get("timeout", 60), config.max_shell_timeout)
         cwd: str = kwargs.get("cwd", str(config.workspaces_dir))
+
+        # Validate cwd is within allowed directories
+        try:
+            resolved_cwd = str(Path(cwd).resolve())
+        except Exception:
+            return {
+                "success": False,
+                "error": f"Invalid working directory: {cwd}",
+                "failure_kind": "access_denied",
+            }
+        if not any(resolved_cwd.startswith(root) for root in _ALLOWED_CWD_ROOTS):
+            return {
+                "success": False,
+                "error": f"Working directory not allowed: {cwd}. Must be under: {', '.join(_ALLOWED_CWD_ROOTS)}",
+                "failure_kind": "access_denied",
+            }
 
         log.info(f"Shell exec: {command} (cwd={cwd}, timeout={timeout}s)")
 

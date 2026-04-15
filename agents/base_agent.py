@@ -202,6 +202,11 @@ class BaseAgent:
                 parameters, assessed_risk, verdict,
                 error=error_msg,
             )
+            log.error(f"[{self.name}] Tool {tool_name} exception: {error_msg}")
+            await notify(
+                f"🔥 <b>{self.name}</b> — errore tool <b>{tool_name}</b>\n"
+                f"<code>{error_msg[:400]}</code>"
+            )
             return {"success": False, "error": error_msg}
 
     async def run(

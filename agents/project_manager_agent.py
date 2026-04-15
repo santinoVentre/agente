@@ -259,9 +259,10 @@ class ProjectManagerAgent(BaseAgent):
             "- Tool disponibili e azioni REALI: "
             "`filesystem(action=read|write|append|list|delete|mkdir|exists|move)`, "
             "`shell(command=..., cwd=..., timeout=...)`, "
-            "`github(action=validate_auth|create_repo|push_file|push_directory|get_repo|list_repos|delete_repo)`, "
+            "`github(action=validate_auth|create_repo|push_file|git_push|push_directory|get_repo|list_repos|delete_repo)`, "
             "`vercel(action=validate_auth|deploy_from_github|get_project|list_projects|list_deployments|delete_project)`, "
             "`project_registry(...)`, `telegram(send_file)`, `browser(...)`, `monitoring(...)`\n"
+            "- Per push su GitHub, preferisci SEMPRE `git_push` (Git CLI, veloce, singolo commit) rispetto a `push_directory` (REST API, lento).\n"
             "- Rispondi sempre in italiano al cliente.\n"
             "- Usa solo function calling reale; non simulare mai tool-call nel testo.\n"
             "- Dopo ogni modifica: aggiorna `PM_CONTEXT.md` → sezione `## Storico modifiche`."
@@ -512,6 +513,9 @@ class ProjectManagerAgent(BaseAgent):
         )
         await task_manager.update_task_status(task_id, TaskStatus.IN_PROGRESS, progress=5)
 
+        # Snapshot file state before modifications
+        pre_snapshot = await self._get_file_snapshot(task_id)
+
         raw_response = await super().run(
             user_message=user_message,
             task_id=task_id,
@@ -519,4 +523,64 @@ class ProjectManagerAgent(BaseAgent):
             system_prompt=self._build_system_prompt(),
             model_override=model_override or get_model_for_task(TaskType.WEB_DEV),
         )
+
+        # Diff summary: notify user about changed files
+        await self._send_diff_summary(pre_snapshot, task_id)
+
         return await self._format_client_reply(raw_response, task_id)
+
+    async def _get_file_snapshot(self, task_id: int) -> dict[str, str]:
+        """Get a snapshot of file modification times in the workspace."""
+        result = await self.execute_tool(
+            "shell",
+            {
+                "command": f"find {self.workdir} -type f -not -path '*/node_modules/*' -not -path '*/.next/*' -not -path '*/.git/*' -printf '%T@ %p\\n' 2>/dev/null | sort",
+                "timeout": 10,
+                "cwd": self.workdir,
+            },
+            task_id,
+        )
+        snapshot: dict[str, str] = {}
+        if result.get("success"):
+            for line in (result.get("stdout") or "").strip().split("\n"):
+                parts = line.strip().split(" ", 1)
+                if len(parts) == 2:
+                    snapshot[parts[1]] = parts[0]
+        return snapshot
+
+    async def _send_diff_summary(self, pre_snapshot: dict[str, str], task_id: int) -> None:
+        """Compare file snapshots and send a summary of changes to Telegram."""
+        post_snapshot = await self._get_file_snapshot(task_id)
+
+        added = [p for p in post_snapshot if p not in pre_snapshot]
+        removed = [p for p in pre_snapshot if p not in post_snapshot]
+        modified = [
+            p for p in post_snapshot
+            if p in pre_snapshot and post_snapshot[p] != pre_snapshot[p]
+        ]
+
+        if not added and not removed and not modified:
+            return  # No changes detected
+
+        lines = [f"📋 <b>Riepilogo modifiche — {self.project_name}</b>\n"]
+        if added:
+            lines.append(f"<b>Nuovi file ({len(added)}):</b>")
+            for p in added[:15]:
+                rel = p.replace(self.workdir + "/", "")
+                lines.append(f"  + {rel}")
+            if len(added) > 15:
+                lines.append(f"  … e altri {len(added) - 15}")
+        if modified:
+            lines.append(f"\n<b>File modificati ({len(modified)}):</b>")
+            for p in modified[:15]:
+                rel = p.replace(self.workdir + "/", "")
+                lines.append(f"  ~ {rel}")
+            if len(modified) > 15:
+                lines.append(f"  … e altri {len(modified) - 15}")
+        if removed:
+            lines.append(f"\n<b>File rimossi ({len(removed)}):</b>")
+            for p in removed[:10]:
+                rel = p.replace(self.workdir + "/", "")
+                lines.append(f"  - {rel}")
+
+        await notify("\n".join(lines))

@@ -220,6 +220,42 @@ class TaskManager:
         if self._redis:
             await self._redis.close()
 
+    async def get_stuck_waiting_tasks(self, older_than_minutes: int = 30) -> list[Task]:
+        """Find tasks stuck in WAITING_APPROVAL for longer than the threshold."""
+        threshold = datetime.now(timezone.utc) - __import__("datetime").timedelta(minutes=older_than_minutes)
+        async with async_session() as session:
+            result = await session.execute(
+                select(Task).where(
+                    Task.status == TaskStatus.WAITING_APPROVAL,
+                    Task.created_at < threshold,
+                ).order_by(Task.created_at.asc())
+            )
+            return list(result.scalars().all())
+
 
 # Singleton
 task_manager = TaskManager()
+
+
+async def task_recovery_job():
+    """Scheduler job: notify owner about tasks stuck in WAITING_APPROVAL."""
+    from tg.notifications import notify
+
+    stuck = await task_manager.get_stuck_waiting_tasks(older_than_minutes=30)
+    if not stuck:
+        return
+
+    lines = [f"⚠️ <b>{len(stuck)} task in attesa di approvazione da oltre 30 min:</b>\n"]
+    for t in stuck[:10]:
+        age_min = int((datetime.now(timezone.utc) - t.created_at).total_seconds() / 60)
+        lines.append(f"  • #{t.id} — {t.description[:60]} ({age_min} min fa)")
+    lines.append("\nRispondi /tasks per gestirli, oppure verranno annullati fra 2h.")
+
+    await notify("\n".join(lines))
+
+    # Auto-cancel tasks stuck for > 2 hours
+    for t in stuck:
+        age_hours = (datetime.now(timezone.utc) - t.created_at).total_seconds() / 3600
+        if age_hours > 2:
+            await task_manager.update_task_status(t.id, TaskStatus.CANCELLED, error="Auto-cancellato: nessuna approvazione ricevuta entro 2h")
+            log.info(f"Task #{t.id} auto-cancelled after {age_hours:.1f}h waiting")

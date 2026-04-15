@@ -281,6 +281,7 @@ class WebDevPlanningSession:
         if q:
             self.answers[q["key"]] = answer
             self.current_question_idx += 1
+            _schedule_redis_save(self.user_id, self)
 
     def add_media(self, file_path: str) -> None:
         self.media_files.append(file_path)
@@ -353,6 +354,9 @@ class WebDevPlanningSession:
 
 _active_sessions: dict[int, WebDevPlanningSession] = {}
 
+_REDIS_PREFIX = "webdev_session:"
+_SESSION_TTL = 86400  # 24h
+
 
 def get_session(user_id: int) -> WebDevPlanningSession | None:
     return _active_sessions.get(user_id)
@@ -361,12 +365,14 @@ def get_session(user_id: int) -> WebDevPlanningSession | None:
 def start_session(user_id: int, initial_message: str) -> WebDevPlanningSession:
     session = WebDevPlanningSession(user_id=user_id, initial_message=initial_message)
     _active_sessions[user_id] = session
+    _schedule_redis_save(user_id, session)
     log.info(f"[webdev_planner] Started session for user {user_id}")
     return session
 
 
 def end_session(user_id: int) -> None:
     _active_sessions.pop(user_id, None)
+    _schedule_redis_delete(user_id)
     log.info(f"[webdev_planner] Ended session for user {user_id}")
 
 
@@ -376,6 +382,96 @@ def abort_session(user_id: int) -> bool:
         end_session(user_id)
         return True
     return False
+
+
+# ── Redis persistence helpers ──────────────────────────────────────────────
+
+async def save_session_to_redis(user_id: int, session: WebDevPlanningSession) -> None:
+    """Persist Q&A session state to Redis."""
+    import redis.asyncio as aioredis
+    try:
+        r = aioredis.from_url(config.redis_url, decode_responses=True)
+        key = f"{_REDIS_PREFIX}{user_id}"
+        data = {
+            "user_id": str(user_id),
+            "initial_message": session.initial_message,
+            "answers": json.dumps(session.answers, ensure_ascii=False),
+            "media_files": json.dumps(session.media_files),
+            "image_insights": json.dumps(session.image_insights, ensure_ascii=False),
+            "current_question_idx": str(session.current_question_idx),
+        }
+        await r.hset(key, mapping=data)
+        await r.expire(key, _SESSION_TTL)
+        await r.aclose()
+    except Exception as e:
+        log.warning(f"[webdev_planner] Failed to save session to Redis: {e}")
+
+
+async def restore_sessions_from_redis() -> int:
+    """Restore Q&A planning sessions from Redis at startup. Returns count restored."""
+    import redis.asyncio as aioredis
+    try:
+        r = aioredis.from_url(config.redis_url, decode_responses=True)
+        keys = []
+        async for key in r.scan_iter(match=f"{_REDIS_PREFIX}*"):
+            keys.append(key)
+
+        restored = 0
+        for key in keys:
+            try:
+                data = await r.hgetall(key)
+                if not data:
+                    continue
+                uid = int(data["user_id"])
+                session = WebDevPlanningSession(
+                    user_id=uid,
+                    initial_message=data["initial_message"],
+                )
+                session.answers = json.loads(data.get("answers", "{}"))
+                session.media_files = json.loads(data.get("media_files", "[]"))
+                session.image_insights = json.loads(data.get("image_insights", "[]"))
+                session.current_question_idx = int(data.get("current_question_idx", "0"))
+                _active_sessions[uid] = session
+                restored += 1
+            except Exception as e:
+                log.warning(f"[webdev_planner] Failed to restore session from {key}: {e}")
+                await r.delete(key)
+
+        await r.aclose()
+        if restored:
+            log.info(f"[webdev_planner] Restored {restored} Q&A sessions from Redis")
+        return restored
+    except Exception as e:
+        log.warning(f"[webdev_planner] Failed to restore sessions from Redis: {e}")
+        return 0
+
+
+def _schedule_redis_save(user_id: int, session: WebDevPlanningSession) -> None:
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(save_session_to_redis(user_id, session))
+    except RuntimeError:
+        pass
+
+
+def _schedule_redis_delete(user_id: int) -> None:
+    import asyncio
+
+    async def _delete():
+        import redis.asyncio as aioredis
+        try:
+            r = aioredis.from_url(config.redis_url, decode_responses=True)
+            await r.delete(f"{_REDIS_PREFIX}{user_id}")
+            await r.aclose()
+        except Exception:
+            pass
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_delete())
+    except RuntimeError:
+        pass
 
 
 # ── LLM helpers ────────────────────────────────────────────────────────────

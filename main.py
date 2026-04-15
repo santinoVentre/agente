@@ -116,6 +116,18 @@ async def startup():
     if cleaned:
         log.info(f"Cleaned up {cleaned} stale tasks from previous run")
 
+    # 2c. Restore persisted sessions from Redis
+    try:
+        from core.pm_session import restore_pm_sessions_from_redis
+        from core.webdev_planner import restore_sessions_from_redis as restore_webdev_sessions
+
+        pm_count = await restore_pm_sessions_from_redis()
+        qa_count = await restore_webdev_sessions()
+        if pm_count or qa_count:
+            log.info(f"Restored sessions: {pm_count} PM, {qa_count} Q&A")
+    except Exception as e:
+        log.warning(f"Session restore failed (non-critical): {e}")
+
     # 3. Load DB-registered tools
     await tool_registry.load_all()
     log.info(f"Tool registry loaded ({tool_registry.count()} tools)")
@@ -143,11 +155,13 @@ async def startup():
     from core.monitoring import monitoring_job
     from core.backup import backup_job
     from core.security_hardening import security_audit_job
+    from core.task_manager import task_recovery_job
 
     scheduler.register_handler("monitoring", monitoring_job)
     scheduler.register_handler("backup", backup_job)
     scheduler.register_handler("security_audit", security_audit_job)
     scheduler.register_handler("inventory", inventory_job)
+    scheduler.register_handler("task_recovery", task_recovery_job)
 
     await scheduler.ensure_job(
         name="monitoring",
@@ -172,6 +186,12 @@ async def startup():
         handler_name="inventory",
         interval_seconds=900,          # every 15 minutes
         description="Snapshot infrastrutturale persistente (servizi, risorse, integrazioni)",
+    )
+    await scheduler.ensure_job(
+        name="task_recovery",
+        handler_name="task_recovery",
+        interval_seconds=600,          # every 10 minutes
+        description="Notifica task bloccati in WAITING_APPROVAL e auto-cancel dopo 2h",
     )
 
     scheduler.start()

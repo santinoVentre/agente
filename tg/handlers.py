@@ -896,7 +896,7 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     # ── Planning session: specs file upload ──────────────────────────────
-    from core.webdev_planner import get_session, end_session
+    from core.webdev_planner import get_session, end_session, PLANNING_QUESTIONS
     session = get_session(user_id)
     if session and not session.completed:
         fname = doc.file_name or ""
@@ -913,7 +913,6 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 # Skip remaining questions and finalize immediately
                 session.current_question_idx = len(PLANNING_QUESTIONS)  # mark all done
                 # Fill remaining answers as "vedi file specs"
-                from core.webdev_planner import PLANNING_QUESTIONS
                 for q in PLANNING_QUESTIONS:
                     session.answers.setdefault(q["key"], "Vedi file specs allegato")
 

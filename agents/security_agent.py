@@ -58,6 +58,7 @@ _ALWAYS_PROTECTED_PATTERNS = [
     "/root/", "/boot/",
     "id_rsa", "id_ed25519",
     ".env",          # Never expose environment secrets
+    "/srv/agent/app",  # Agent's own source code — never self-modify without approval
 ]
 
 _READ_ONLY_DIAGNOSTIC_TOKENS = {
@@ -254,6 +255,12 @@ class SecurityAgent:
                 parameters.get("path", ""),
                 parameters.get("action", "read"),
             )
+        elif tool_name == "github":
+            action_name = parameters.get("action", "")
+            if action_name in ("create_repo", "git_push"):
+                risk = RiskLevel.HIGH  # Require explicit approval
+            else:
+                risk = risk_override or RiskLevel.MEDIUM
         else:
             risk = risk_override or RiskLevel.LOW
 

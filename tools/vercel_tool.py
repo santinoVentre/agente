@@ -133,11 +133,17 @@ class VercelTool(BaseTool):
 
                     latest = None
                     if kwargs.get("wait_for_deployment", True):
-                        for _ in range(5):
+                        # Progressive polling: 24 attempts × 5s = up to 120s
+                        for attempt in range(24):
                             latest = await self._latest_deployment(client, data.get("id"))
                             if latest:
-                                break
-                            await asyncio.sleep(2)
+                                state = str(latest.get("state", "")).lower()
+                                if state == "ready":
+                                    break
+                                # If building/queued, keep waiting
+                                if state in ("error", "canceled"):
+                                    break
+                            await asyncio.sleep(5)
 
                     if not latest:
                         return {
