@@ -312,12 +312,12 @@ class GitHubTool(BaseTool):
                     remote_url = f"https://x-access-token:{config.github_token}@github.com/{owner}/{repo}.git"
 
                     # Build a shell script to init, add, commit, push
-                    # Use -C to avoid cd issues; configure git to avoid identity prompts
+                    # Prefer existing global git identity; fallback to legacy agent identity.
                     git_script = (
                         f'cd "{source_dir}" && '
                         f'git init -b {branch} && '
-                        f'git config user.email "agent@automated.dev" && '
-                        f'git config user.name "Agent" && '
+                        f'git config user.email "$(git config --global user.email || echo agent@automated.dev)" && '
+                        f'git config user.name "$(git config --global user.name || echo Agent)" && '
                         f'git add -A && '
                         f'git commit -m "{commit_msg}" --allow-empty && '
                         f'git remote remove origin 2>/dev/null; '
